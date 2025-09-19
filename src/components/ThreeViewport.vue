@@ -1,7 +1,15 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { onMounted, onBeforeUnmount, ref, watch, computed } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls'
+import { DDSLoader } from 'three/examples/jsm/loaders/DDSLoader'
+
+type OverlayImage = {
+  name: string
+  url: string
+  visible: boolean
+  opacity: number
+}
 
 type Props = {
   widthWorld: number
@@ -15,6 +23,14 @@ type Props = {
   metalU8?: Uint8Array
   metalW?: number
   metalL?: number
+
+  // Texturing + display toggles
+  baseColorUrl?: string | null
+  wireframe?: boolean
+  showGrid?: boolean
+
+  // Additional image overlays from folder
+  overlays?: OverlayImage[]
 }
 
 const props = defineProps<Props>()
@@ -28,36 +44,119 @@ let mesh: THREE.Mesh | null = null
 let grid: THREE.GridHelper | null = null
 
 // Metal overlay resources
-let overlayMesh: THREE.Mesh | null = null
-let overlayMat: THREE.MeshBasicMaterial | null = null
-let overlayTex: THREE.DataTexture | null = null
+let metalMesh: THREE.Mesh | null = null
+let metalMat: THREE.MeshBasicMaterial | null = null
+let metalTex: THREE.DataTexture | null = null
+
+// Image overlay resources (from folder)
+type ImgLayer = { mesh: THREE.Mesh, mat: THREE.MeshBasicMaterial, tex: THREE.Texture, name: string }
+let imgLayers: ImgLayer[] = []
+
+// Base color texture
+let baseTex: THREE.Texture | THREE.CompressedTexture | null = null
+
+// Fullscreen state to adjust layout height
+const isFullscreen = ref(false)
+const viewportStyle = computed(() => ({
+  height: '100vh',
+}))
 
 let animationId = 0
 
-function disposeOverlay() {
-  if (overlayMesh && scene) {
-    scene.remove(overlayMesh)
-    overlayMesh = null
+function onFullscreenChange() {
+  isFullscreen.value = document.fullscreenElement === container.value
+}
+
+function disposeMetal() {
+  if (metalMesh && scene) {
+    scene.remove(metalMesh)
+    metalMesh = null
   }
-  if (overlayMat) {
-    overlayMat.dispose()
-    overlayMat = null
+  if (metalMat) {
+    metalMat.dispose()
+    metalMat = null
   }
-  if (overlayTex) {
-    overlayTex.dispose()
-    overlayTex = null
+  if (metalTex) {
+    metalTex.dispose()
+    metalTex = null
   }
 }
 
-function buildOverlay(geom: THREE.BufferGeometry) {
-  disposeOverlay()
+function disposeImgLayers() {
+  for (const l of imgLayers) {
+    if (scene && l.mesh) scene.remove(l.mesh)
+    l.mat.dispose()
+    l.tex.dispose()
+  }
+  imgLayers = []
+}
+
+function disposeBaseTex() {
+  if (baseTex) {
+    baseTex.dispose()
+    baseTex = null
+  }
+}
+
+function isDDS(url: string | null | undefined): boolean {
+  return !!url && /\.dds$/i.test(url)
+}
+function ddsSupported(): boolean {
+  const gl: any = renderer?.getContext?.()
+  if (!gl) return true
+  return !!(
+    gl.getExtension('WEBGL_compressed_texture_s3tc') ||
+    gl.getExtension('WEBKIT_WEBGL_compressed_texture_s3tc') ||
+    gl.getExtension('MOZ_WEBGL_compressed_texture_s3tc') ||
+    gl.getExtension('EXT_texture_compression_s3tc')
+  )
+}
+function loadAnyTexture(
+  url: string,
+  onLoad: (tex: THREE.Texture | THREE.CompressedTexture) => void,
+  onError: (err: unknown) => void
+): THREE.Texture | THREE.CompressedTexture {
+  if (isDDS(url)) {
+    return new DDSLoader().load(url, onLoad, undefined, onError)
+  }
+  return new THREE.TextureLoader().load(url, onLoad, undefined, onError)
+}
+function applyBaseTexture(mat: THREE.MeshStandardMaterial) {
+  disposeBaseTex()
+  if (!props.baseColorUrl) {
+    mat.map = null
+    mat.needsUpdate = true
+    return
+  }
+  baseTex = loadAnyTexture(
+    props.baseColorUrl as string,
+    (tex) => {
+      if (isDDS(props.baseColorUrl)) {
+        ;(tex as any).colorSpace = THREE.NoColorSpace
+      } else {
+        ;(tex as any).colorSpace = THREE.SRGBColorSpace
+      }
+      ;(tex as any).wrapS = (tex as any).wrapT = THREE.RepeatWrapping
+      mat.map = tex as any
+      mat.needsUpdate = true
+    },
+    (err) => {
+      console.warn('Failed to load base texture:', err)
+    }
+  )
+}
+
+function buildMetalOverlay(geom: THREE.BufferGeometry) {
+  disposeMetal()
 
   if (!scene) return
   if (!props.showMetal) return
   if (!props.metalU8 || !props.metalW || !props.metalL) return
 
-  const { metalU8, metalW, metalL } = props
-  const pxCount = metalW * metalL
+  const metalU8 = props.metalU8 as Uint8Array
+  const mw = props.metalW!
+  const ml = props.metalL!
+  const pxCount = mw * ml
   if (metalU8.length < pxCount) {
     console.warn('ThreeViewport: metalU8 size does not match expected resolution', {
       have: metalU8.length,
@@ -77,40 +176,81 @@ function buildOverlay(geom: THREE.BufferGeometry) {
     data[j + 3] = a   // A
   }
 
-  overlayTex = new THREE.DataTexture(data, metalW, metalL, THREE.RGBAFormat, THREE.UnsignedByteType)
-  overlayTex.colorSpace = THREE.NoColorSpace
-  // Align metal overlay with terrain
-  overlayTex.center.set(0.5, 0.5)
-  overlayTex.flipY = true
-  overlayTex.generateMipmaps = false
-  overlayTex.minFilter = THREE.NearestFilter
-  overlayTex.magFilter = THREE.NearestFilter
-  overlayTex.wrapS = THREE.ClampToEdgeWrapping
-  overlayTex.wrapT = THREE.ClampToEdgeWrapping
-  overlayTex.needsUpdate = true
+  metalTex = new THREE.DataTexture(data, mw, ml, THREE.RGBAFormat, THREE.UnsignedByteType)
+  metalTex.colorSpace = THREE.NoColorSpace
+  // Align metal overlay with terrain: flip Y
+  metalTex.center.set(0.5, 0.5)
+  metalTex.flipY = true
+  metalTex.generateMipmaps = false
+  metalTex.minFilter = THREE.NearestFilter
+  metalTex.magFilter = THREE.NearestFilter
+  metalTex.wrapS = THREE.ClampToEdgeWrapping
+  metalTex.wrapT = THREE.ClampToEdgeWrapping
+  metalTex.needsUpdate = true
 
-  overlayMat = new THREE.MeshBasicMaterial({
-    map: overlayTex,
+  metalMat = new THREE.MeshBasicMaterial({
+    map: metalTex,
     transparent: true,
     depthWrite: false,
-    // Draw slightly in front to reduce z-fighting with terrain
     polygonOffset: true,
     polygonOffsetFactor: -1,
     polygonOffsetUnits: -1,
   })
 
-  // Share the same displaced geometry so overlay matches terrain surface
-  overlayMesh = new THREE.Mesh(geom, overlayMat)
-  overlayMesh.renderOrder = 1
-  scene.add(overlayMesh)
+  metalMesh = new THREE.Mesh(geom, metalMat)
+  metalMesh.renderOrder = 1
+  scene.add(metalMesh)
+}
+
+function buildImageOverlays(geom: THREE.BufferGeometry) {
+  disposeImgLayers()
+  if (!scene || !props.overlays) return
+
+  let order = 2
+  for (const ov of props.overlays) {
+    if (!ov.visible) continue
+    const tex = loadAnyTexture(
+      ov.url,
+      () => {},
+      (err: unknown) => {
+        console.warn('Failed to load overlay texture:', ov.name, err)
+      }
+    )
+    ;(tex as any).colorSpace = isDDS(ov.url) ? THREE.NoColorSpace : THREE.SRGBColorSpace
+    ;(tex as any).wrapS = THREE.ClampToEdgeWrapping
+    ;(tex as any).wrapT = THREE.ClampToEdgeWrapping
+    ;(tex as any).flipY = true // match terrain orientation (same as metal)
+
+    const dds = isDDS(ov.url)
+    if (dds && !ddsSupported()) {
+      console.warn('DDS unsupported by GPU/browser, skipping overlay:', ov.name)
+      continue
+    }
+    const mat = new THREE.MeshBasicMaterial({
+      map: tex as any,
+      transparent: !dds, // for DDS (often normals), ignore alpha by disabling transparency
+      opacity: Math.max(0, Math.min(1, ov.opacity)),
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+      // For more realistic blending with base texture, try:
+      // blending: THREE.MultiplyBlending,
+    })
+    const mesh = new THREE.Mesh(geom, mat)
+    mesh.renderOrder = order++
+    scene.add(mesh)
+    imgLayers.push({ mesh, mat, tex: tex as any, name: ov.name })
+  }
 }
 
 function buildMesh() {
   if (!scene) return
   // Dispose previous
   if (mesh) {
-    // Note: overlay shares geometry; dispose overlay first to avoid double-dispose issues.
-    disposeOverlay()
+    // Note: overlays share geometry; dispose them first to avoid double-dispose issues.
+    disposeMetal()
+    disposeImgLayers()
 
     mesh.geometry.dispose()
     ;(mesh.material as THREE.Material).dispose()
@@ -154,17 +294,25 @@ function buildMesh() {
     roughness: 1.0,
     side: THREE.DoubleSide,
     flatShading: false,
+    wireframe: !!props.wireframe,
   })
+
+  // Apply base color texture if provided
+  applyBaseTexture(mat)
 
   mesh = new THREE.Mesh(geom, mat)
   scene.add(mesh)
 
-  // Build metal overlay sharing this geometry
-  buildOverlay(geom)
+  // Metal overlay sharing this geometry
+  buildMetalOverlay(geom)
+
+  // Image overlays sharing this geometry
+  buildImageOverlays(geom)
 
   // Grid helper for orientation
   const size = Math.max(widthWorld, lengthWorld)
   grid = new THREE.GridHelper(size, 20, 0x222222, 0x444444)
+  grid.visible = props.showGrid ?? true
   scene.add(grid)
 }
 
@@ -217,16 +365,21 @@ function init() {
 
 onMounted(() => {
   init()
+  document.addEventListener('fullscreenchange', onFullscreenChange)
+  onFullscreenChange()
 })
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(animationId)
   window.removeEventListener('resize', () => {})
+  document.removeEventListener('fullscreenchange', onFullscreenChange)
   if (controls) {
     controls.dispose()
     controls = null
   }
-  disposeOverlay()
+  disposeMetal()
+  disposeImgLayers()
+  disposeBaseTex()
   if (renderer) {
     renderer.dispose()
     renderer.forceContextLoss()
@@ -249,25 +402,72 @@ watch(
   { deep: false }
 )
 
-// Rebuild only overlay when metal data or visibility changes
+// Update metal overlay when metal data or visibility changes
 watch(
   () => [props.showMetal, props.metalU8, props.metalW, props.metalL],
   () => {
     if (!mesh) return
-    buildOverlay(mesh.geometry)
+    buildMetalOverlay(mesh.geometry)
   },
   { deep: false }
 )
+
+// Update image overlays when overlays array changes
+watch(
+  () => props.overlays,
+  () => {
+    if (!mesh) return
+    buildImageOverlays(mesh.geometry)
+  },
+  { deep: true }
+)
+
+// Update base map when URL changes
+watch(
+  () => props.baseColorUrl,
+  () => {
+    if (!mesh) return
+    const mat = mesh.material as THREE.MeshStandardMaterial
+    applyBaseTexture(mat)
+  }
+)
+
+// Update wireframe toggle
+watch(
+  () => props.wireframe,
+  () => {
+    if (!mesh) return
+    const mat = mesh.material as THREE.MeshStandardMaterial
+    mat.wireframe = !!props.wireframe
+    mat.needsUpdate = true
+  }
+)
+
+// Update grid visibility
+watch(
+  () => props.showGrid,
+  () => {
+    if (grid) grid.visible = props.showGrid ?? true
+  }
+)
+
+// Expose a method to request fullscreen for this viewport
+defineExpose({
+  requestFullscreen: () => {
+    const el = container.value as any
+    if (el?.requestFullscreen) el.requestFullscreen()
+  },
+})
 </script>
 
 <template>
-  <div class="viewport" ref="container"></div>
+  <div class="viewport" :style="viewportStyle" ref="container"></div>
 </template>
 
 <style scoped>
 .viewport {
   width: 100%;
-  height: calc(100vh - 160px);
+  /* Height is set via inline style based on fullscreen state */
   min-height: 400px;
   outline: 1px solid #222;
   box-sizing: border-box;

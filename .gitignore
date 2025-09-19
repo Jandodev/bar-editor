@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Map example assets (do not commit)
+MAP_EXAMPLES_NOCOMMIT/**
+# Allow a placeholder to keep the directory if desired
+!MAP_EXAMPLES_NOCOMMIT/.gitkeep

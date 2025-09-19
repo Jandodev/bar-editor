@@ -1,11 +1,29 @@
+/* Global reset for SPA fullscreen layout */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden; /* Prevent page scrollbars; internal panels can scroll */
+  background: #0b0c0e; /* Match app background */
+  color-scheme: dark light;
+}
+
+/* Root defaults (keep legibility + smoothing) */
 :root {
   font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
-  color-scheme: light dark;
   color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -13,67 +31,67 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Remove Vite starter centering and min constraints */
+body {
+  display: block;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Ensure Vue mount container has no margins or padding */
+#app {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  text-align: initial;
+}
+
+/* Minimal element styles (optional) */
 a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
+  color: #7aa2ff;
+  text-decoration: none;
 }
 a:hover {
-  color: #535bf2;
+  text-decoration: underline;
 }
 
-body {
-  margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
-  min-height: 100vh;
-}
-
-h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
-}
-
+/* Buttons baseline (optional) */
 button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
+  border-radius: 6px;
+  border: 1px solid #3a3f46;
+  padding: 0.5em 0.9em;
   font-size: 1em;
-  font-weight: 500;
   font-family: inherit;
-  background-color: #1a1a1a;
+  background-color: #1a1c1e;
+  color: #e8e8e8;
   cursor: pointer;
-  transition: border-color 0.25s;
+  transition: border-color 0.2s ease;
 }
 button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
+  border-color: #7aa2ff;
 }
 
-.card {
-  padding: 2em;
-}
-
-#app {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
-}
-
+/* Light scheme adjustments */
 @media (prefers-color-scheme: light) {
   :root {
     color: #213547;
-    background-color: #ffffff;
+    background: #ffffff;
   }
-  a:hover {
-    color: #747bff;
+  html,
+  body,
+  #app {
+    background: #ffffff;
+    color: #213547;
+  }
+  a {
+    color: #4a66ff;
   }
   button {
-    background-color: #f9f9f9;
+    background-color: #f3f5f8;
+    color: #1c1e22;
+    border-color: #d0d5dd;
+  }
+  button:hover {
+    border-color: #4a66ff;
   }
 }
