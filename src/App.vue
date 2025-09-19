@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import ThreeViewport from './components/ThreeViewport.vue'
 import { parseSMF, computeWorldSize, chooseStride, downsampleHeightField, type SMFParsed } from './lib/smf'
 
@@ -22,6 +22,7 @@ const showGrid = ref(true)
 type ImgEntry = { name: string; url: string; file: File }
 const folderImages = ref<ImgEntry[]>([])
 const baseColorUrl = ref<string | null>(null)
+const baseColorIsDDS = ref(false)
 
 // Overlay controls built from folder images
 type OverlayControl = { name: string; url: string; visible: boolean; opacity: number }
@@ -50,7 +51,7 @@ function pickBaseTextureURL(entries: ImgEntry[]): string | null {
 async function handleFiles(files: FileList | null) {
   errorMsg.value = null
   if (!files || files.length === 0) return
-  const file = files[0] as File
+  const file = files?.item(0)
   if (!file) return
   try {
     const buf = await file.arrayBuffer()
@@ -87,6 +88,35 @@ async function handleFiles(files: FileList | null) {
   }
 }
 
+const loadSMFFromFile = async (file: File): Promise<void> => {
+  try {
+    const buf = await file.arrayBuffer()
+    const parsed = parseSMF(buf)
+    smf.value = parsed
+
+    const ws = computeWorldSize(parsed.header)
+    widthWorld.value = ws.widthWorld
+    lengthWorld.value = ws.lengthWorld
+
+    const segMax = Math.max(parsed.header.width, parsed.header.length)
+    const stride = chooseStride(segMax, 512)
+    strideUsed.value = stride
+
+    const { out, outW, outL } = downsampleHeightField(
+      parsed.heightFloat,
+      parsed.header.width,
+      parsed.header.length,
+      stride
+    )
+    heights.value = out
+    gridW.value = outW
+    gridL.value = outL
+  } catch (err) {
+    console.error(err)
+    errorMsg.value = (err as Error).message || String(err)
+  }
+}
+
 function onFileChange(e: Event) {
   const input = e.target as HTMLInputElement
   handleFiles(input.files)
@@ -98,19 +128,45 @@ function onFolderChange(e: Event) {
   revokeFolderUrls()
   if (!files || files.length === 0) return
   const imgs: ImgEntry[] = []
+  let foundSmf: File | null = null
   for (let i = 0; i < files.length; i++) {
     const f = files.item(i)!
-    // Keep only image-like files
-    if (/^image\//i.test(f.type) || /\.(png|jpe?g|webp|bmp|tga|dds)$/i.test(f.name)) {
-      imgs.push({ name: f.webkitRelativePath || f.name, url: URL.createObjectURL(f), file: f })
+    const name = f.webkitRelativePath || f.name
+    if (/\.smf$/i.test(name)) {
+      foundSmf = f
+    }
+    // Keep only image-like files (support DDS explicitly)
+    if (/^image\//i.test(f.type) || /\.(png|jpe?g|webp|bmp|tga|dds)$/i.test(name)) {
+      imgs.push({ name, url: URL.createObjectURL(f), file: f })
     }
   }
   // Sort for stable UI
   imgs.sort((a, b) => a.name.localeCompare(b.name))
   folderImages.value = imgs
+
+  // Choose base texture and track if it's DDS (blob URLs hide extension)
   baseColorUrl.value = pickBaseTextureURL(imgs)
-  overlays.value = imgs.map(img => ({ name: img.name, url: img.url, visible: true, opacity: 1 }))
+  const baseEntry = imgs.find(e => e.url === baseColorUrl.value)
+  baseColorIsDDS.value = !!baseEntry && /\.dds$/i.test(baseEntry?.file.name || baseEntry?.name)
+
+  // Build overlays with DDS hint so viewer uses DDSLoader even for blob: URLs
+  overlays.value = imgs.map(img => ({
+    name: img.name,
+    url: img.url,
+    visible: true,
+    opacity: 1,
+    isDDS: /\.dds$/i.test(img.file.name || img.name),
+  }))
+
+  // Auto-import .smf if present in the directory
+  if (foundSmf) {
+    loadSMFFromFile(foundSmf)
+  }
 }
+watch(baseColorUrl, (newUrl) => {
+  const baseEntry = folderImages.value.find(e => e.url === newUrl)
+  baseColorIsDDS.value = !!baseEntry && /\.dds$/i.test(baseEntry?.file.name || baseEntry?.name)
+})
 </script>
 
 <template>
@@ -133,6 +189,7 @@ function onFolderChange(e: Event) {
         :metalW="smf?.metalWidth"
         :metalL="smf?.metalLength"
         :baseColorUrl="baseColorUrl"
+      :baseColorIsDDS="baseColorIsDDS"
         :wireframe="wireframe"
         :showGrid="showGrid"
         :overlays="overlays"

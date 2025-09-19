@@ -9,6 +9,7 @@ type OverlayImage = {
   url: string
   visible: boolean
   opacity: number
+  isDDS?: boolean
 }
 
 type Props = {
@@ -26,6 +27,7 @@ type Props = {
 
   // Texturing + display toggles
   baseColorUrl?: string | null
+  baseColorIsDDS?: boolean
   wireframe?: boolean
   showGrid?: boolean
 
@@ -104,22 +106,76 @@ function isDDS(url: string | null | undefined): boolean {
 function ddsSupported(): boolean {
   const gl: any = renderer?.getContext?.()
   if (!gl) return true
-  return !!(
+  // Broad set of common compressed texture extensions
+  const hasS3TC =
     gl.getExtension('WEBGL_compressed_texture_s3tc') ||
     gl.getExtension('WEBKIT_WEBGL_compressed_texture_s3tc') ||
     gl.getExtension('MOZ_WEBGL_compressed_texture_s3tc') ||
-    gl.getExtension('EXT_texture_compression_s3tc')
-  )
+    gl.getExtension('EXT_texture_compression_s3tc') ||
+    gl.getExtension('WEBGL_compressed_texture_s3tc_srgb')
+  const hasRGTC = gl.getExtension('EXT_texture_compression_rgtc')
+  const hasBPTC = gl.getExtension('EXT_texture_compression_bptc')
+  return !!(hasS3TC || hasRGTC || hasBPTC)
+}
+
+/** Create a visible placeholder texture (magenta/black checker) to indicate missing/unsupported DDS. */
+function createPlaceholderTexture(size = 4): THREE.DataTexture {
+  const w = size, h = size
+  const data = new Uint8Array(w * h * 4)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4
+      const isMagenta = ((x ^ y) & 1) === 0
+      data[i + 0] = isMagenta ? 255 : 0
+      data[i + 1] = 0
+      data[i + 2] = isMagenta ? 255 : 0
+      data[i + 3] = 255
+    }
+  }
+  const tex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat)
+  tex.colorSpace = THREE.NoColorSpace
+  tex.needsUpdate = true
+  return tex
 }
 function loadAnyTexture(
   url: string,
   onLoad: (tex: THREE.Texture | THREE.CompressedTexture) => void,
-  onError: (err: unknown) => void
+  onError: (err: unknown) => void,
+  isDDSHint?: boolean
 ): THREE.Texture | THREE.CompressedTexture {
-  if (isDDS(url)) {
-    return new DDSLoader().load(url, onLoad, undefined, onError)
+  if (isDDSHint === true || isDDS(url)) {
+    if (!ddsSupported()) {
+      console.warn('DDS not supported by GPU/browser; using placeholder for:', url)
+      const placeholder = createPlaceholderTexture()
+      // still call onLoad so the caller can attach the texture
+      try { onLoad(placeholder) } catch {}
+      return placeholder
+    }
+    return new DDSLoader().load(
+      url,
+      (tex: THREE.CompressedTexture) => {
+        console.info('DDS loaded:', url)
+        onLoad(tex)
+      },
+      undefined,
+      (err: unknown) => {
+        console.error('DDS load error:', url, err)
+        onError(err)
+      }
+    )
   }
-  return new THREE.TextureLoader().load(url, onLoad, undefined, onError)
+  return new THREE.TextureLoader().load(
+    url,
+    (tex: THREE.Texture) => {
+      console.info('Image loaded:', url)
+      onLoad(tex)
+    },
+    undefined,
+    (err: unknown) => {
+      console.error('Image load error:', url, err)
+      onError(err)
+    }
+  )
 }
 function applyBaseTexture(mat: THREE.MeshStandardMaterial) {
   disposeBaseTex()
@@ -137,12 +193,14 @@ function applyBaseTexture(mat: THREE.MeshStandardMaterial) {
         ;(tex as any).colorSpace = THREE.SRGBColorSpace
       }
       ;(tex as any).wrapS = (tex as any).wrapT = THREE.RepeatWrapping
+      ;(tex as any).flipY = true
       mat.map = tex as any
       mat.needsUpdate = true
     },
     (err) => {
       console.warn('Failed to load base texture:', err)
-    }
+    },
+    props.baseColorIsDDS === true
   )
 }
 
@@ -214,7 +272,8 @@ function buildImageOverlays(geom: THREE.BufferGeometry) {
       () => {},
       (err: unknown) => {
         console.warn('Failed to load overlay texture:', ov.name, err)
-      }
+      },
+      ov.isDDS === true
     )
     ;(tex as any).colorSpace = isDDS(ov.url) ? THREE.NoColorSpace : THREE.SRGBColorSpace
     ;(tex as any).wrapS = THREE.ClampToEdgeWrapping
@@ -229,7 +288,7 @@ function buildImageOverlays(geom: THREE.BufferGeometry) {
     const mat = new THREE.MeshBasicMaterial({
       map: tex as any,
       transparent: !dds, // for DDS (often normals), ignore alpha by disabling transparency
-      opacity: Math.max(0, Math.min(1, ov.opacity)),
+      opacity: Math.max(0, Math.min(1, ov.opacity ?? 1)),
       depthWrite: false,
       polygonOffset: true,
       polygonOffsetFactor: -1,
