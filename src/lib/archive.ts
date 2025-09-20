@@ -1,4 +1,5 @@
 import JSZip from 'jszip';
+import { parseMapinfoLua } from './mapinfo';
 
 export interface ResolvedImage {
   path: string;
@@ -12,6 +13,8 @@ export interface ResolvedPackage {
   mapinfoPath?: string;
   mapinfoText?: string;
   images: ResolvedImage[];
+  // All non-directory entries inside the archive (full relative paths)
+  filePaths: string[];
 }
 
 /**
@@ -29,23 +32,48 @@ export async function resolveMapPackageFromZip(file: File): Promise<ResolvedPack
     if (!fileEntry.dir) filePaths.push(relativePath);
   });
 
+  // Will be populated if mapinfo.lua exists
+  let mapinfoText: string | undefined;
+
   // Helpers
   const isSMF = (p: string) => p.toLowerCase().endsWith('.smf');
   const isUnderMaps = (p: string) => /^maps\/.+\.smf$/i.test(p);
   const isMapInfo = (p: string) => /(^|\/)mapinfo\.lua$/i.test(p);
   const isImage = (p: string) => /\.(png|jpe?g|webp|bmp|tga|dds)$/i.test(p);
 
-  // Choose SMF: prefer under maps/
+  // Mapinfo.lua (optional)
+  const mapinfoPath = filePaths.find(isMapInfo);
+
+  // Choose SMF, prefer the one specified in mapinfo.mapfile if present; otherwise prefer under maps/
   const smfCandidates = filePaths.filter(isSMF);
   const smfMaps = smfCandidates.filter(isUnderMaps);
-  const smfPath = smfMaps[0] ?? smfCandidates[0];
+  let smfPath = smfMaps[0] ?? smfCandidates[0];
+
+  if (mapinfoPath) {
+    const mf = zip.file(mapinfoPath);
+    if (mf) {
+      try {
+        const txt = await mf.async('string');
+        mapinfoText = txt;
+        const mi = parseMapinfoLua(txt);
+        const mfPath: unknown = mi?.mapfile;
+        if (typeof mfPath === 'string' && mfPath.trim()) {
+          // Normalize and try to find a matching entry in the archive (case-insensitive, suffix match)
+          const wanted = mfPath.replace(/^[./\\]+/, '').toLowerCase();
+          const matched = filePaths.find(p => p.toLowerCase().endsWith(wanted));
+          if (matched && isSMF(matched)) {
+            smfPath = matched;
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to parse mapinfo.lua in archive, falling back to default SMF selection:', e);
+      }
+    }
+  }
 
   if (!smfPath) {
     throw new Error('No .smf file found inside archive. Expected e.g. maps/<mapname>.smf');
   }
-
-  // Mapinfo.lua (optional)
-  const mapinfoPath = filePaths.find(isMapInfo);
 
   // Images
   const imageKeys = filePaths.filter(isImage);
@@ -57,9 +85,8 @@ export async function resolveMapPackageFromZip(file: File): Promise<ResolvedPack
   }
   const smfBuffer = await smfFile.async('arraybuffer');
 
-  // Load mapinfo text (optional)
-  let mapinfoText: string | undefined;
-  if (mapinfoPath) {
+  // Load mapinfo text (optional) if not already loaded above
+  if (!mapinfoText && mapinfoPath) {
     const mf = zip.file(mapinfoPath);
     if (mf) {
       mapinfoText = await mf.async('string');
@@ -86,5 +113,6 @@ export async function resolveMapPackageFromZip(file: File): Promise<ResolvedPack
     mapinfoPath,
     mapinfoText,
     images,
+    filePaths,
   };
 }

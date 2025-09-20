@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Lua Parser Debug - mapinfo.lua</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+        background: #0b0c0e;
+        color: #e6e6e6;
+      }
+      .page {
+        display: grid;
+        grid-template-columns: 420px 1fr;
+        gap: 16px;
+        padding: 16px;
+        min-height: 100vh;
+        box-sizing: border-box;
+      }
+      .panel {
+        border: 1px solid #222;
+        border-radius: 6px;
+        background: #111214;
+        padding: 12px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 18px;
+        color: #9fb0ff;
+      }
+      .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+      input[type="file"] {
+        border: 1px solid #2a2a2a;
+        background: #1b1d22;
+        color: #e6e6e6;
+        border-radius: 4px;
+        padding: 6px;
+      }
+      button {
+        border: 1px solid #2a2a2a;
+        background: #1b1d22;
+        color: #e6e6e6;
+        border-radius: 4px;
+        padding: 6px 10px;
+        cursor: pointer;
+      }
+      button:hover { background: #20232a; }
+      .status { margin: 8px 0; padding: 6px 8px; border-radius: 4px; font-size: 13px; }
+      .status.ok { background: #122015; border: 1px solid #243d29; color: #b9e0c0; }
+      .status.err { background: #2a1313; border: 1px solid #4a1e1e; color: #ff8e8e; }
+      textarea {
+        width: 100%;
+        min-height: 360px;
+        resize: vertical;
+        box-sizing: border-box;
+        background: #0f1115;
+        color: #cfd4e6;
+        border: 1px solid #2a2a2a;
+        border-radius: 4px;
+        padding: 8px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 12px;
+      }
+      pre {
+        margin: 0;
+        background: #0f1115;
+        color: #cfd4e6;
+        border: 1px solid #2a2a2a;
+        border-radius: 4px;
+        padding: 8px;
+        overflow: auto;
+        max-height: calc(100vh - 140px);
+        white-space: pre;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 12px;
+      }
+      .col { display: flex; flex-direction: column; gap: 12px; }
+      .tiny { font-size: 12px; color: #aab; }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <div class="panel col">
+        <h1>mapinfo.lua Debug</h1>
+        <div class="row">
+          <input id="fileInput" type="file" accept=".lua" />
+          <button id="parseBtn">Parse</button>
+          <button id="clearBtn">Clear</button>
+        </div>
+        <div id="status" class="status">Ready</div>
+        <div class="tiny">Paste mapinfo.lua or load a file, then click Parse.</div>
+        <textarea id="luaInput" spellcheck="false"></textarea>
+      </div>
+
+      <div class="panel col">
+        <h1>Parsed JSON</h1>
+        <pre id="jsonOut"></pre>
+        <h1>Errors</h1>
+        <pre id="errOut"></pre>
+        <h1>Sanitized Input</h1>
+        <pre id="sanOut"></pre>
+        <h1>Extracted Table</h1>
+        <pre id="extractOut"></pre>
+      </div>
+    </div>
+
+    <script type="module" src="/src/debug/lua-debug.ts"></script>
+  </body>
+</html>

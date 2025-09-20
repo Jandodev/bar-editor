@@ -33,9 +33,21 @@ type Props = {
 
   // Additional image overlays from folder
   overlays?: OverlayImage[]
+
+  // Environment from mapinfo.lua (optional)
+  env?: {
+    ambient?: [number, number, number]
+    sunColor?: [number, number, number]
+    sunDir?: [number, number, number]
+    skyColor?: [number, number, number]
+    fogStart?: number
+    fogEnd?: number
+    fogColor?: [number, number, number]
+  }
 }
 
 const props = defineProps<Props>()
+const emit = defineEmits<{ (e: 'fps', fps: number): void }>()
 
 const container = ref<HTMLDivElement | null>(null)
 let renderer: THREE.WebGLRenderer | null = null
@@ -44,6 +56,10 @@ let camera: THREE.PerspectiveCamera | null = null
 let controls: OrbitControls | null = null
 let mesh: THREE.Mesh | null = null
 let grid: THREE.GridHelper | null = null
+
+// Lights
+let ambientLight: THREE.AmbientLight | null = null
+let dirLight: THREE.DirectionalLight | null = null
 
 // Metal overlay resources
 let metalMesh: THREE.Mesh | null = null
@@ -60,10 +76,12 @@ let baseTex: THREE.Texture | THREE.CompressedTexture | null = null
 // Fullscreen state to adjust layout height
 const isFullscreen = ref(false)
 const viewportStyle = computed(() => ({
-  height: '100vh',
+  height: isFullscreen.value ? '100vh' : '100%',
 }))
 
 let animationId = 0
+let framesSince = 0
+let lastFpsTs = performance.now()
 
 function onFullscreenChange() {
   isFullscreen.value = document.fullscreenElement === container.value
@@ -116,6 +134,41 @@ function ddsSupported(): boolean {
   const hasRGTC = gl.getExtension('EXT_texture_compression_rgtc')
   const hasBPTC = gl.getExtension('EXT_texture_compression_bptc')
   return !!(hasS3TC || hasRGTC || hasBPTC)
+}
+
+// Convert float RGB [0..1] to THREE.Color, with fallback
+function toThreeColor(rgb?: [number, number, number], fallback: [number, number, number] = [1, 1, 1]): THREE.Color {
+  const c = new THREE.Color()
+  const v = (rgb && rgb.length >= 3) ? rgb : fallback
+  c.setRGB(v[0], v[1], v[2])
+  return c
+}
+
+function applyEnvSettings() {
+  if (!scene) return
+  const env = props.env
+  if (!env) return
+
+  if (ambientLight) {
+    ambientLight.color.copy(toThreeColor(env.ambient, [1, 1, 1]))
+  }
+  if (dirLight) {
+    dirLight.color.copy(toThreeColor(env.sunColor, [1, 1, 1]))
+    if (env.sunDir && env.sunDir.length >= 3) {
+      const v = new THREE.Vector3(env.sunDir[0], env.sunDir[1], env.sunDir[2]).normalize().multiplyScalar(1000)
+      dirLight.position.copy(v)
+    }
+  }
+  if (env.skyColor) {
+    scene.background = toThreeColor(env.skyColor, [0.055, 0.055, 0.063])
+  }
+  if (env.fogColor !== undefined && env.fogStart !== undefined && env.fogEnd !== undefined) {
+    if (camera) {
+      const near = Math.max(0.1, (env.fogStart ?? 0.1) * camera.far)
+      const far = Math.max(near + 1, (env.fogEnd ?? 1.0) * camera.far)
+      scene.fog = new THREE.Fog(toThreeColor(env.fogColor, [0, 0, 0]).getHex(), near, far)
+    }
+  }
 }
 
 /** Create a visible placeholder texture (magenta/black checker) to indicate missing/unsupported DDS. */
@@ -184,9 +237,16 @@ function applyBaseTexture(mat: THREE.MeshStandardMaterial) {
     mat.needsUpdate = true
     return
   }
-  baseTex = loadAnyTexture(
+  // Use a tiny placeholder first; swap in real texture when it finishes loading.
+  const placeholder = createPlaceholderTexture(2)
+  baseTex = placeholder
+  mat.map = placeholder
+  mat.needsUpdate = true
+
+  loadAnyTexture(
     props.baseColorUrl as string,
     (tex) => {
+      // Configure color space + addressing
       if (isDDS(props.baseColorUrl)) {
         ;(tex as any).colorSpace = THREE.NoColorSpace
       } else {
@@ -194,6 +254,11 @@ function applyBaseTexture(mat: THREE.MeshStandardMaterial) {
       }
       ;(tex as any).wrapS = (tex as any).wrapT = THREE.RepeatWrapping
       ;(tex as any).flipY = true
+      // Swap in loaded texture
+      if (baseTex && baseTex !== tex) {
+        try { (baseTex as any).dispose?.() } catch {}
+      }
+      baseTex = tex as any
       mat.map = tex as any
       mat.needsUpdate = true
     },
@@ -267,27 +332,15 @@ function buildImageOverlays(geom: THREE.BufferGeometry) {
   let order = 2
   for (const ov of props.overlays) {
     if (!ov.visible) continue
-    const tex = loadAnyTexture(
-      ov.url,
-      () => {},
-      (err: unknown) => {
-        console.warn('Failed to load overlay texture:', ov.name, err)
-      },
-      ov.isDDS === true
-    )
-    ;(tex as any).colorSpace = isDDS(ov.url) ? THREE.NoColorSpace : THREE.SRGBColorSpace
-    ;(tex as any).wrapS = THREE.ClampToEdgeWrapping
-    ;(tex as any).wrapT = THREE.ClampToEdgeWrapping
-    ;(tex as any).flipY = true // match terrain orientation (same as metal)
+    if (!ov.url) continue
 
     const dds = isDDS(ov.url)
-    if (dds && !ddsSupported()) {
-      console.warn('DDS unsupported by GPU/browser, skipping overlay:', ov.name)
-      continue
-    }
+    // Start with placeholder; replace when the real texture is loaded
+    const placeholder = createPlaceholderTexture(2)
+
     const mat = new THREE.MeshBasicMaterial({
-      map: tex as any,
-      transparent: !dds, // for DDS (often normals), ignore alpha by disabling transparency
+      map: placeholder as any,
+      transparent: !dds, // DDS overlays often have no alpha; disable transparency
       opacity: Math.max(0, Math.min(1, ov.opacity ?? 1)),
       depthWrite: false,
       polygonOffset: true,
@@ -296,10 +349,29 @@ function buildImageOverlays(geom: THREE.BufferGeometry) {
       // For more realistic blending with base texture, try:
       // blending: THREE.MultiplyBlending,
     })
+
+    // Kick off async load and swap in when ready
+    loadAnyTexture(
+      ov.url,
+      (loaded) => {
+        ;(loaded as any).colorSpace = dds ? THREE.NoColorSpace : THREE.SRGBColorSpace
+        ;(loaded as any).wrapS = THREE.ClampToEdgeWrapping
+        ;(loaded as any).wrapT = THREE.ClampToEdgeWrapping
+        ;(loaded as any).flipY = true // match terrain orientation (same as metal/terrain)
+        mat.map = loaded as any
+        mat.needsUpdate = true
+        try { placeholder.dispose() } catch {}
+      },
+      (err: unknown) => {
+        console.warn('Failed to load overlay texture:', ov.name, err)
+      },
+      ov.isDDS === true
+    )
+
     const mesh = new THREE.Mesh(geom, mat)
     mesh.renderOrder = order++
     scene.add(mesh)
-    imgLayers.push({ mesh, mat, tex: tex as any, name: ov.name })
+    imgLayers.push({ mesh, mat, tex: placeholder as any, name: ov.name })
   }
 }
 
@@ -396,11 +468,14 @@ function init() {
   controls.target.set(props.widthWorld * 0.5 - props.widthWorld * 0.5, 0, props.lengthWorld * 0.5 - props.lengthWorld * 0.5)
 
   // Lights
-  const ambient = new THREE.AmbientLight(0xffffff, 0.6)
-  scene.add(ambient)
-  const dir = new THREE.DirectionalLight(0xffffff, 0.8)
-  dir.position.set(1, 1, 1).multiplyScalar(1000)
-  scene.add(dir)
+  ambientLight = new THREE.AmbientLight(0xffffff, 0.6)
+  scene.add(ambientLight)
+  dirLight = new THREE.DirectionalLight(0xffffff, 0.8)
+  dirLight.position.set(1, 1, 1).multiplyScalar(1000)
+  scene.add(dirLight)
+
+  // Apply environment if provided
+  applyEnvSettings()
 
   buildMesh()
 
@@ -418,6 +493,16 @@ function init() {
     animationId = requestAnimationFrame(animate)
     if (controls) controls.update()
     renderer?.render(scene!, camera!)
+
+    // Emit FPS roughly once per second
+    framesSince++
+    const now = performance.now()
+    if (now - lastFpsTs >= 1000) {
+      const fps = Math.round((framesSince * 1000) / (now - lastFpsTs))
+      emit('fps', fps)
+      framesSince = 0
+      lastFpsTs = now
+    }
   }
   animate()
 }
@@ -439,6 +524,17 @@ onBeforeUnmount(() => {
   disposeMetal()
   disposeImgLayers()
   disposeBaseTex()
+
+  // Remove lights
+  if (scene && ambientLight) {
+    scene.remove(ambientLight)
+    ambientLight = null
+  }
+  if (scene && dirLight) {
+    scene.remove(dirLight)
+    dirLight = null
+  }
+
   if (renderer) {
     renderer.dispose()
     renderer.forceContextLoss()
@@ -502,12 +598,21 @@ watch(
   }
 )
 
-// Update grid visibility
+ // Update grid visibility
 watch(
   () => props.showGrid,
   () => {
     if (grid) grid.visible = props.showGrid ?? true
   }
+)
+
+// Update environment when mapinfo-derived settings change
+watch(
+  () => props.env,
+  () => {
+    applyEnvSettings()
+  },
+  { deep: true }
 )
 
 // Expose a method to request fullscreen for this viewport

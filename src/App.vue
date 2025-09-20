@@ -1,10 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import ThreeViewport from './components/ThreeViewport.vue'
-import { parseSMF, computeWorldSize, chooseStride, downsampleHeightField, type SMFParsed } from './lib/smf'
+import { parseSMF, computeWorldSize, chooseStride, downsampleHeightField, u16ToFloatHeights, type SMFParsed } from './lib/smf'
 import { resolveMapPackageFromZip } from './lib/archive'
 import { parseMapinfoLua } from './lib/mapinfo'
 import { pickDirectoryAndCollectFiles } from './lib/folder'
+import Toolbar from './components/app/Toolbar.vue'
+import StatusBar from './components/app/StatusBar.vue'
+import FileUploadPanel from './components/panels/FileUploadPanel.vue'
+import PerfDrawer from './components/app/PerfDrawer.vue'
 
 const smf = ref<SMFParsed | null>(null)
 const errorMsg = ref<string | null>(null)
@@ -20,6 +24,36 @@ const strideUsed = ref(1)
 const showMetal = ref(true)
 const wireframe = ref(false)
 const showGrid = ref(true)
+const fps = ref<number | null>(null)
+
+// Panel visibility
+const showLeftPanel = ref(true)
+const showRightPanel = ref(true)
+
+// Top-bar hidden inputs for quick load actions
+const smfInputTop = ref<HTMLInputElement | null>(null)
+const pkgInputTop = ref<HTMLInputElement | null>(null)
+const folderInputTop = ref<HTMLInputElement | null>(null)
+const mapinfoInputTop = ref<HTMLInputElement | null>(null)
+
+function triggerTopSmf() { smfInputTop.value?.click() }
+function triggerTopPkg() { pkgInputTop.value?.click() }
+function triggerTopFolder() { folderInputTop.value?.click() }
+function triggerTopMapinfo() { mapinfoInputTop.value?.click() }
+
+function toggleLeftPanel() { showLeftPanel.value = !showLeftPanel.value }
+function toggleRightPanel() { showRightPanel.value = !showRightPanel.value }
+
+// Collapsible sections (left/right panels)
+const collapseFilesLeft = ref(false)
+const collapseDetection = ref(false)
+const collapseMapDefinition = ref(false)
+const collapseMapInfo = ref(false)
+const collapseDisplay = ref(false)
+const collapseBaseTexture = ref(false)
+const collapseMapinfoResources = ref(false)
+const collapseMapinfoJson = ref(false)
+const collapseOverlays = ref(false)
 
 // Folder-based textures
 type ImgEntry = { name: string; url: string; file: File }
@@ -31,17 +65,133 @@ const baseColorIsDDS = ref(false)
 type OverlayControl = { name: string; url: string; visible: boolean; opacity: number; isDDS?: boolean }
 const overlays = ref<OverlayControl[]>([])
 
+// Full file browser of uploaded content
+type UploadedEntry = { path: string; url?: string; isImage: boolean; isDDS: boolean; file?: File }
+const uploadedFiles = ref<UploadedEntry[]>([])
+
+// Tree view state
+type TreeNode = { name: string; path: string; isDir: boolean; children?: TreeNode[]; entry?: UploadedEntry }
+const treeExpanded = ref<Set<string>>(new Set())
+
+function buildTree(entries: UploadedEntry[]): TreeNode[] {
+  const root: Record<string, any> = {}
+  for (const e of entries) {
+    const parts = e.path.split(/[\\/]+/).filter(Boolean)
+    let cur = root
+    let curPath = ''
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i]
+      curPath = curPath ? `${curPath}/${part}` : part
+      cur.children = cur.children || {}
+      if (!cur.children[part]) {
+        cur.children[part] = { name: part, path: curPath, isDir: i < parts.length - 1, children: {} }
+      }
+      cur = cur.children[part]
+      if (i === parts.length - 1) {
+        cur.isDir = false
+        cur.entry = e
+      }
+    }
+  }
+  function toArray(node: any): TreeNode[] {
+    if (!node.children) return []
+    const arr: TreeNode[] = Object.values(node.children).map((n: any) => ({
+      name: n.name,
+      path: n.path,
+      isDir: n.isDir,
+      children: n.isDir ? toArray(n) : undefined,
+      entry: n.entry,
+    }))
+    arr.sort((a, b) => {
+      if (a.isDir && !b.isDir) return -1
+      if (!a.isDir && b.isDir) return 1
+      return a.name.localeCompare(b.name)
+    })
+    return arr
+  }
+  return toArray(root)
+}
+const fileTree = computed<TreeNode[]>(() => buildTree(uploadedFiles.value))
+
+function toggleNode(path: string) {
+  const s = new Set(treeExpanded.value)
+  if (s.has(path)) s.delete(path)
+  else s.add(path)
+  treeExpanded.value = s
+}
+
+function overlayFromEntry(e: UploadedEntry) {
+  if (!e.isImage || !e.url) return
+  const exists = overlays.value.find(o => o.url === e.url)
+  if (!exists) {
+    overlays.value.push({ name: e.path, url: e.url, visible: true, opacity: 1, isDDS: e.isDDS })
+  } else {
+    exists.visible = true
+    exists.opacity = 1
+  }
+}
+
+function useAsBaseFromEntry(e: UploadedEntry) {
+  if (!e.isImage || !e.url) return
+  baseColorUrl.value = e.url
+  baseColorIsDDS.value = !!e.isDDS
+}
+
+async function parseMapinfoFromEntry(e: UploadedEntry) {
+  if (!e.file) return
+  try {
+    const txt = await e.file.text()
+    mapinfoJSON.value = parseMapinfoLua(txt)
+    mapinfoPath.value = e.path
+    console.info('Parsed mapinfo.lua (tree):', mapinfoJSON.value)
+    tryApplyBaseTextureFromMapinfo()
+    maybeRescaleHeights()
+  } catch (err) {
+    console.warn('Failed to parse mapinfo.lua from tree:', err)
+  }
+}
+
+async function loadSmfFromEntry(e: UploadedEntry) {
+  if (!e.file) return
+  if (!/\.smf$/i.test(e.path)) return
+  await loadSMFFromFile(e.file)
+}
+
 // Child ref for fullscreen API (still available if needed)
 const viewportRef = ref<InstanceType<typeof ThreeViewport> | null>(null)
 
 const header = computed(() => smf.value?.header)
 const mapinfoJSON = ref<any | null>(null)
+const mapinfoPath = ref<string | null>(null)
+const prettyMapinfo = computed(() => mapinfoJSON.value ? JSON.stringify(mapinfoJSON.value, null, 2) : '')
+
+const envFromMapinfo = computed(() => {
+  const m = mapinfoJSON.value as any
+  if (!m) return null
+  const env: any = {}
+  const atm = m.atmosphere || {}
+  const lig = m.lighting || {}
+
+  if (lig.groundAmbientColor) env.ambient = tuple3(lig.groundAmbientColor)
+  if (atm.sunColor) env.sunColor = tuple3(atm.sunColor)
+  const sd = lig.sunDir || atm.skyDir
+  if (sd) env.sunDir = tuple3(sd)
+  if (atm.skyColor) env.skyColor = tuple3(atm.skyColor)
+  if (atm.fogStart !== undefined) env.fogStart = Number(atm.fogStart)
+  if (atm.fogEnd !== undefined) env.fogEnd = Number(atm.fogEnd)
+  if (atm.fogColor) env.fogColor = tuple3(atm.fogColor)
+
+  return env
+})
+
 const autoResolveAfterSmf = ref(true)
 const dirPickerSupported = ref<boolean>(typeof (window as any) !== 'undefined' && !!(window as any).showDirectoryPicker)
 
 function revokeFolderUrls() {
   for (const e of folderImages.value) URL.revokeObjectURL(e.url)
+  for (const e of uploadedFiles.value) if (e.url) URL.revokeObjectURL(e.url)
   folderImages.value = []
+  uploadedFiles.value = []
   baseColorUrl.value = null
   overlays.value = []
 }
@@ -53,6 +203,236 @@ function pickBaseTextureURL(entries: ImgEntry[]): string | null {
   const found = entries.find(e => prefer.test(e.name))
   const candidate = found ?? entries[0]
   return candidate ? candidate.url : null
+}
+
+// Normalize a variety of tuple-like inputs to [number, number, number]
+const tuple3 = (v: any): [number, number, number] => {
+  if (Array.isArray(v)) return [Number(v[0] ?? 0), Number(v[1] ?? 0), Number(v[2] ?? 0)]
+  if (v && typeof v === 'object') {
+    return [Number((v as any).x ?? (v as any)[0] ?? 0), Number((v as any).y ?? (v as any)[1] ?? 0), Number((v as any).z ?? (v as any)[2] ?? 0)]
+  }
+  return [0, 0, 0]
+}
+
+// Find an image entry by matching the end of its path (case-insensitive)
+function findImageBySuffix(relPath: string): ImgEntry | undefined {
+  const lower = relPath.toLowerCase().replace(/^[./\\]+/, '')
+  return folderImages.value.find(e => e.name.toLowerCase().endsWith(lower))
+}
+
+// Find an overlay entry by matching the end of its path (case-insensitive)
+function findOverlayBySuffix(relPath: string): OverlayControl | undefined {
+  const lower = relPath.toLowerCase().replace(/^[./\\]+/, '')
+  return overlays.value.find(e => e.name.toLowerCase().endsWith(lower))
+}
+
+// Ensure that a referenced texture from mapinfo is visible as an overlay
+function ensureOverlayVisible(relPath: string, opacity = 1): void {
+  const ov = findOverlayBySuffix(relPath)
+  if (ov) {
+    ov.visible = true
+    ov.opacity = opacity
+  }
+}
+// Ensure overlay by exact URL (used when user binds a file from the picker)
+function ensureOverlayByUrl(url: string, opacity = 1): void {
+  if (!url) return
+  const ov = overlays.value.find(e => e.url === url)
+  if (ov) {
+    ov.visible = true
+    ov.opacity = opacity
+  }
+}
+
+// Find an SMF in a FileList by suffix (case-insensitive)
+function findSmfInFileListBySuffix(files: FileList, relPath: string): File | null {
+  const lower = relPath.toLowerCase().replace(/^[./\\]+/, '')
+  for (let i = 0; i < files.length; i++) {
+    const f = files.item(i)!
+    const name = (f.webkitRelativePath || f.name).toLowerCase()
+    if (name.endsWith(lower)) return f
+  }
+  return null
+}
+
+// Find an SMF in a collected directory listing by suffix (case-insensitive)
+function findSmfInCollectedBySuffix(collected: { path: string; file: File }[], relPath: string): File | null {
+  const lower = relPath.toLowerCase().replace(/^[./\\]+/, '')
+  for (const item of collected) {
+    const name = item.path.toLowerCase()
+    if (name.endsWith(lower)) return item.file
+  }
+  return null
+}
+
+// Resource management (mapinfo.resources and mapinfo.smf texture overrides)
+const resourceKeys = {
+  smf: ['minimapTex','metalmapTex','typemapTex','grassmapTex'],
+  resources: [
+    'grassBladeTex','grassShadingTex','detailTex','specularTex',
+    'splatDetailTex','splatDistrTex','skyReflectModTex',
+    'detailNormalTex','lightEmissionTex','parallaxHeightTex'
+  ],
+} as const
+
+const resourceSelections = ref<Record<string, string>>({})
+const showOnlyResourceOverlays = ref(false)
+const overlaysToRender = computed(() => {
+  if (!mapinfoJSON.value || !showOnlyResourceOverlays.value) return overlays.value
+  const urls = new Set(Object.values(resourceSelections.value).filter(Boolean))
+  return overlays.value.filter(o => urls.has(o.url))
+})
+
+// SMT discovery from uploaded content and mapinfo references
+const smtFilesFound = computed(() =>
+  uploadedFiles.value
+    .filter(e => /\.smt$/i.test(e.path))
+    .map(e => e.path)
+    .sort((a, b) => a.localeCompare(b))
+)
+
+const smtRefsFromMapinfo = computed(() => {
+  const m = mapinfoJSON.value as any
+  const out: string[] = []
+  if (!m || !m.smf) return out
+  const smf = m.smf
+  for (const k of Object.keys(smf)) {
+    if (/^smtfilename\d*$/i.test(k)) {
+      const v = smf[k]
+      if (typeof v === 'string' && v.trim()) out.push(v)
+    }
+  }
+  return out
+})
+
+// Mapinfo summary fields (basic metadata)
+const mapinfoSummary = computed(() => {
+  const m = mapinfoJSON.value as any
+  if (!m) return null
+  return {
+    name: m.name,
+    shortname: m.shortname,
+    version: m.version,
+    author: m.author,
+    description: m.description,
+    mapfile: m.mapfile,
+  }
+})
+
+function resourceId(section: 'smf'|'resources', key: string): string {
+  return `${section}.${key}`
+}
+
+function onResourceSelected(id: string) {
+  const url = resourceSelections.value[id]
+  if (url) ensureOverlayByUrl(url, 1)
+}
+
+// Initialize/refresh resource bindings when mapinfo or files change
+watch([mapinfoJSON, folderImages], () => {
+  const m: any = mapinfoJSON.value || {}
+  const smfSec: any = m.smf || {}
+  const resSec: any = m.resources || {}
+
+  const bindIfMissing = (section: 'smf'|'resources', key: string, path: any) => {
+    const id = resourceId(section, key)
+    if (resourceSelections.value[id] === undefined) {
+      resourceSelections.value[id] = ''
+    }
+    if (!resourceSelections.value[id] && typeof path === 'string' && path.trim()) {
+      const found = findImageBySuffix(path)
+      if (found) resourceSelections.value[id] = found.url
+    }
+  }
+
+  ;(resourceKeys.smf as readonly string[]).forEach((k) => bindIfMissing('smf', k as string, (smfSec as any)?.[k as any]))
+  ;(resourceKeys.resources as readonly string[]).forEach((k) => bindIfMissing('resources', k as string, (resSec as any)?.[k as any]))
+
+  // Auto-enable any bound overlays
+  for (const [id, url] of Object.entries(resourceSelections.value)) {
+    if (url) ensureOverlayByUrl(url, 1)
+  }
+}, { immediate: true })
+
+// If mapinfo.lua specifies texture overrides, attempt to select one as base texture
+function tryApplyBaseTextureFromMapinfo() {
+  const m = mapinfoJSON.value as any
+  if (!m) return
+  const smfSec = m.smf || {}
+  const res = m.resources || {}
+
+  // Prefer a specific base texture if provided
+  const baseCandidates: (string | undefined)[] = [
+    res.detailTex,
+    res.splatDetailTex,
+    smfSec.minimapTex, // fallback to minimap if it's the only thing present
+  ]
+  for (const p of baseCandidates) {
+    if (typeof p === 'string' && p.trim()) {
+      const found = findImageBySuffix(p)
+      if (found) {
+        baseColorUrl.value = found.url
+        break
+      }
+    }
+  }
+
+  // Ensure notable mapinfo textures appear as overlays
+  const overlayCandidates: (string | undefined)[] = [
+    smfSec.minimapTex,
+    smfSec.metalmapTex,
+    smfSec.typemapTex,
+    smfSec.grassmapTex,
+    res.skyReflectModTex,
+    res.specularTex,
+    res.detailNormalTex,
+    res.lightEmissionTex,
+    res.parallaxHeightTex,
+  ]
+  for (const p of overlayCandidates) {
+    if (typeof p === 'string' && p.trim()) {
+      ensureOverlayVisible(p, 1)
+    }
+  }
+}
+
+// Read smf min/max overrides from mapinfo if present
+function getSmfOverrides() {
+  const m = mapinfoJSON.value as any
+  const smfSec = m?.smf || {}
+  // Accept both camelCase and lowercase keys seen in the wild
+  const min = smfSec.minHeight ?? smfSec.minheight
+  const max = smfSec.maxHeight ?? smfSec.maxheight
+  if (typeof min === 'number' || typeof max === 'number') {
+    return {
+      min: typeof min === 'number' ? min : undefined,
+      max: typeof max === 'number' ? max : undefined,
+    }
+  }
+  return null
+}
+
+// If mapinfo overrides min/max heights, rescale our heightFloat and downsampled grid
+function maybeRescaleHeights() {
+  const parsed = smf.value
+  if (!parsed) return
+  const overrides = getSmfOverrides()
+  if (!overrides) return
+  const min = overrides.min ?? parsed.header.minHeight
+  const max = overrides.max ?? parsed.header.maxHeight
+  // If same range, skip
+  if (min === parsed.header.minHeight && max === parsed.header.maxHeight) return
+
+  const floatHeights = u16ToFloatHeights(parsed.heightU16, min, max)
+  const { out, outW, outL } = downsampleHeightField(
+    floatHeights,
+    parsed.header.width,
+    parsed.header.length,
+    strideUsed.value
+  )
+  heights.value = out
+  gridW.value = outW
+  gridL.value = outL
 }
 
 async function handleFiles(files: FileList | null) {
@@ -83,6 +463,8 @@ async function handleFiles(files: FileList | null) {
     heights.value = out
     gridW.value = outW
     gridL.value = outL
+    // Apply mapinfo smf.minHeight/maxHeight overrides if present
+    maybeRescaleHeights()
     if (dirPickerSupported.value && autoResolveAfterSmf.value) {
       try {
         await resolveFromFolder()
@@ -125,6 +507,8 @@ const loadSMFFromFile = async (file: File): Promise<void> => {
     heights.value = out
     gridW.value = outW
     gridL.value = outL
+    // Apply mapinfo smf.minHeight/maxHeight overrides if present
+    maybeRescaleHeights()
     if (dirPickerSupported.value && autoResolveAfterSmf.value) {
       try {
         await resolveFromFolder()
@@ -143,12 +527,32 @@ function onFileChange(e: Event) {
   handleFiles(input.files)
 }
 
+async function onMapinfoFileChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const files = input.files
+  if (!files || files.length === 0) return
+  const f = files.item(0)!
+  try {
+    const txt = await f.text()
+    mapinfoJSON.value = parseMapinfoLua(txt)
+    mapinfoPath.value = f.name
+    console.info('Parsed mapinfo.lua (manual):', mapinfoJSON.value)
+    tryApplyBaseTextureFromMapinfo()
+    maybeRescaleHeights()
+  } catch (err) {
+    console.warn('Failed to parse manual mapinfo.lua:', err)
+    mapinfoJSON.value = null
+    mapinfoPath.value = null
+  }
+}
+
 async function onFolderChange(e: Event) {
   const input = e.target as HTMLInputElement
   const files = input.files
   revokeFolderUrls()
   if (!files || files.length === 0) return
   const imgs: ImgEntry[] = []
+  const fileList: UploadedEntry[] = []
   let foundSmf: File | null = null
   let mapinfoFile: File | null = null
 
@@ -165,13 +569,23 @@ async function onFolderChange(e: Event) {
         mapinfoFile = f
       }
     }
-    // Keep only image-like files (support DDS explicitly)
-    if (/^image\//i.test(f.type) || /\.(png|jpe?g|webp|bmp|tga|dds)$/i.test(name)) {
-      imgs.push({ name, url: URL.createObjectURL(f), file: f })
+    // Track all files for file browser; build URLs for images (including .dds)
+    const isDDS = /\.dds$/i.test(name)
+    const isImage = /^image\//i.test(f.type) || isDDS || /\.(png|jpe?g|webp|bmp|tga)$/i.test(name)
+    let url: string | undefined
+    if (isImage) url = URL.createObjectURL(f)
+    fileList.push({ path: name, url, isImage, isDDS, file: f })
+
+    // Maintain image list used by overlays/base
+    if (isImage && url) {
+      imgs.push({ name, url, file: f })
     }
   }
 
   // Sort for stable UI
+  fileList.sort((a, b) => a.path.localeCompare(b.path))
+  uploadedFiles.value = fileList
+
   imgs.sort((a, b) => a.name.localeCompare(b.name))
   folderImages.value = imgs
 
@@ -194,13 +608,25 @@ async function onFolderChange(e: Event) {
     try {
       const txt = await mapinfoFile.text()
       mapinfoJSON.value = parseMapinfoLua(txt)
+      mapinfoPath.value = mapinfoFile.name
       console.info('Parsed mapinfo.lua (folder):', mapinfoJSON.value)
+      tryApplyBaseTextureFromMapinfo()
+      // Prefer SMF from mapinfo.mapfile if present
+      const mfPath: unknown = (mapinfoJSON.value as any)?.mapfile
+      if (typeof mfPath === 'string' && mfPath.trim()) {
+        const smfOverride = findSmfInFileListBySuffix(files, mfPath)
+        if (smfOverride) foundSmf = smfOverride
+      }
+      // Rescale heights if smf.minHeight/maxHeight overrides present
+      maybeRescaleHeights()
     } catch (err) {
       console.warn('Failed to parse folder mapinfo.lua:', err)
       mapinfoJSON.value = null
+      mapinfoPath.value = null
     }
   } else {
     mapinfoJSON.value = null
+    mapinfoPath.value = null
   }
 
   // Auto-import .smf if present in the directory
@@ -230,6 +656,21 @@ async function handlePackage(file: File) {
 
   try {
     const pkg = await resolveMapPackageFromZip(file)
+
+    // file browser for package: all archive file paths
+    const fileList: UploadedEntry[] = pkg.filePaths.map(p => {
+      const isDDS = /\.dds$/i.test(p)
+      const isImage = isDDS || /\.(png|jpe?g|webp|bmp|tga)$/i.test(p)
+      return {
+        path: p,
+        url: isImage ? pkg.images.find(i => i.path === p)?.blobUrl : undefined,
+        isImage,
+        isDDS,
+        file: undefined,
+      }
+    })
+    fileList.sort((a, b) => a.path.localeCompare(b.path))
+    uploadedFiles.value = fileList
 
     // images -> folderImages/overlays
     const imgs: ImgEntry[] = pkg.images.map(img => ({
@@ -278,13 +719,19 @@ async function handlePackage(file: File) {
     if (pkg.mapinfoText) {
       try {
         mapinfoJSON.value = parseMapinfoLua(pkg.mapinfoText)
+        mapinfoPath.value = pkg.mapinfoPath ?? '(embedded)'
         console.info('Parsed mapinfo.lua:', mapinfoJSON.value)
+        tryApplyBaseTextureFromMapinfo()
+        // Rescale heights if smf.minHeight/maxHeight overrides present
+        maybeRescaleHeights()
       } catch (e) {
         console.warn('Failed to parse mapinfo.lua:', e)
         mapinfoJSON.value = null
+        mapinfoPath.value = null
       }
     } else {
       mapinfoJSON.value = null
+      mapinfoPath.value = null
     }
   } catch (err) {
     console.error(err)
@@ -307,8 +754,9 @@ async function resolveFromFolder() {
   }
   try {
     const collected = await pickDirectoryAndCollectFiles()
-    // Build ImgEntry[] and detect .smf / mapinfo.lua
+    // Build ImgEntry[] and full file browser; detect .smf / mapinfo.lua
     const imgs: ImgEntry[] = []
+    const fileList: UploadedEntry[] = []
     let foundSmf: File | null = null
     let mapinfoFile: File | null = null
 
@@ -327,12 +775,19 @@ async function resolveFromFolder() {
           mapinfoFile = item.file
         }
       }
-      if (/\.(png|jpe?g|webp|bmp|tga|dds)$/i.test(name)) {
-        imgs.push({ name, url: URL.createObjectURL(item.file), file: item.file })
+      const isDDS = /\.dds$/i.test(name)
+      const isImage = isDDS || /\.(png|jpe?g|webp|bmp|tga)$/i.test(name)
+      const url = isImage ? URL.createObjectURL(item.file) : undefined
+      if (isImage && url) {
+        imgs.push({ name, url, file: item.file })
       }
+      fileList.push({ path: name, url, isImage, isDDS, file: item.file })
     }
 
-    // Sort & apply images
+    // Sort & apply images + file browser
+    fileList.sort((a, b) => a.path.localeCompare(b.path))
+    uploadedFiles.value = fileList
+
     imgs.sort((a, b) => a.name.localeCompare(b.name))
     folderImages.value = imgs
 
@@ -353,13 +808,25 @@ async function resolveFromFolder() {
       try {
         const txt = await mapinfoFile.text()
         mapinfoJSON.value = parseMapinfoLua(txt)
+        mapinfoPath.value = mapinfoFile.name
         console.info('Parsed mapinfo.lua (dir picker):', mapinfoJSON.value)
+        tryApplyBaseTextureFromMapinfo()
+        // Prefer SMF from mapinfo.mapfile if present
+        const mfPath: unknown = (mapinfoJSON.value as any)?.mapfile
+        if (typeof mfPath === 'string' && mfPath.trim()) {
+          const smfOverride = findSmfInCollectedBySuffix(collected, mfPath)
+          if (smfOverride) foundSmf = smfOverride
+        }
+        // Rescale heights if smf.minHeight/maxHeight overrides present
+        maybeRescaleHeights()
       } catch (err) {
         console.warn('Failed to parse directory mapinfo.lua:', err)
         mapinfoJSON.value = null
+        mapinfoPath.value = null
       }
     } else {
       mapinfoJSON.value = null
+      mapinfoPath.value = null
     }
 
     // If an SMF exists in folder, load it (even if one was already loaded)
@@ -378,8 +845,100 @@ watch(baseColorUrl, (newUrl) => {
 })
 </script>
 
+<script lang="ts">
+import { defineComponent, h, getCurrentInstance } from 'vue'
+
+export default defineComponent({
+  name: 'App',
+  components: {
+    TreeNodeView: defineComponent({
+      name: 'TreeNodeView',
+      props: {
+        node: { type: Object as () => any, required: true },
+      },
+      setup(props) {
+        const inst = getCurrentInstance()
+        return () => {
+          const parent: any = inst?.proxy?.$parent
+          const n = props.node as any
+          const expanded = n.isDir ? parent?.treeExpanded?.has(n.path) : false
+
+          const row = n.isDir
+            ? h('div', { class: 'fb-row' }, [
+                h('div', {
+                  class: 'fb-path',
+                  onClick: () => parent?.toggleNode?.(n.path),
+                }, [
+                  h('span', { class: 'twisty' }, expanded ? '▼' : '▶'),
+                  h('span', { class: 'dir' }, n.name),
+                ]),
+                h('div', { class: 'fb-tags' }, [ h('span', { class: 'tag' }, 'Folder') ]),
+              ])
+            : h('div', { class: 'fb-row' }, [
+                h('div', { class: 'fb-path' }, [ h('span', { class: 'file' }, n.name) ]),
+                h('div', { class: 'fb-tags' }, [
+                  n.entry?.isDDS ? h('span', { class: 'tag' }, 'DDS') : (n.entry?.isImage ? h('span', { class: 'tag' }, 'Image') : null),
+                  /\.lua$/i.test(n.path) ? h('button', {
+                    class: 'small',
+                    disabled: !n.entry?.file,
+                    onClick: () => parent?.parseMapinfoFromEntry?.(n.entry),
+                  }, 'Parse mapinfo') : null,
+                  /\.smf$/i.test(n.path) ? h('button', {
+                    class: 'small',
+                    disabled: !n.entry?.file,
+                    onClick: () => parent?.loadSmfFromEntry?.(n.entry),
+                  }, 'Load SMF') : null,
+                  n.entry?.isImage ? h('button', {
+                    class: 'small',
+                    onClick: () => parent?.overlayFromEntry?.(n.entry),
+                  }, 'Overlay') : null,
+                  n.entry?.isImage ? h('button', {
+                    class: 'small',
+                    onClick: () => parent?.useAsBaseFromEntry?.(n.entry),
+                  }, 'Use as base') : null,
+                ]),
+              ])
+
+          const children = n.isDir && expanded && n.children && n.children.length
+            ? h('div', { class: 'fb-children' },
+                n.children.map((c: any) => h('TreeNodeView', { node: c, key: c.path }))
+              )
+            : null
+
+          return h('div', { class: 'fb-node' }, [row, children])
+        }
+      },
+    }),
+  },
+})
+</script>
+
 <template>
+  <Toolbar>
+    <button class="small" @click="triggerTopSmf">Load .smf</button>
+    <button class="small" @click="triggerTopPkg">Load .sdz/.zip</button>
+    <button class="small" @click="triggerTopFolder">Load folder</button>
+    <button class="small" @click="triggerTopMapinfo">Load mapinfo.lua</button>
+    <button class="small" v-if="heights && dirPickerSupported" @click="resolveFromFolder">Resolve folder</button>
+    <button class="small" @click="toggleLeftPanel">{{ showLeftPanel ? 'Hide' : 'Show' }} Left</button>
+    <button class="small" @click="toggleRightPanel">{{ showRightPanel ? 'Hide' : 'Show' }} Right</button>
+
+    <input ref="smfInputTop" type="file" accept=".smf,application/octet-stream" @change="onFileChange" style="display:none" />
+    <input ref="pkgInputTop" type="file" accept=".sdz,.zip,.sd7" @change="onPackageChange" style="display:none" />
+    <input ref="folderInputTop" type="file" webkitdirectory directory multiple @change="onFolderChange" style="display:none" />
+    <input ref="mapinfoInputTop" type="file" accept=".lua" @change="onMapinfoFileChange" style="display:none" />
+  </Toolbar>
   <div class="app">
+    <aside class="sidebar left" v-if="showLeftPanel">
+      <div class="section" v-if="uploadedFiles.length" v-show="!collapseFilesLeft">
+        <h3 class="collapsible" @click="collapseFilesLeft = !collapseFilesLeft"><span class="twisty">{{ collapseFilesLeft ? '▶' : '▼' }}</span> Files</h3>
+        <div class="file-browser">
+          <template v-for="n in fileTree" :key="n.path">
+            <TreeNodeView :node="n" />
+          </template>
+        </div>
+      </div>
+    </aside>
     <div class="main">
       <div v-if="!heights" class="empty">
         <p>Select an .smf file to visualize the heightmap.</p>
@@ -398,40 +957,52 @@ watch(baseColorUrl, (newUrl) => {
         :metalW="smf?.metalWidth"
         :metalL="smf?.metalLength"
         :baseColorUrl="baseColorUrl"
-      :baseColorIsDDS="baseColorIsDDS"
+        :baseColorIsDDS="baseColorIsDDS"
         :wireframe="wireframe"
         :showGrid="showGrid"
-        :overlays="overlays"
+        :overlays="overlaysToRender"
+        :env="envFromMapinfo"
+        @fps="fps = $event"
       />
     </div>
 
-    <aside class="sidebar">
-      <div class="section">
-        <h3>Load</h3>
-        <label class="file">
-          <input type="file" accept=".smf,application/octet-stream" @change="onFileChange" />
-          <span>Load .smf</span>
-        </label>
-        <label class="file">
-          <input type="file" accept=".sdz,.zip,.sd7" @change="onPackageChange" />
-          <span>Load map package (.sdz/.zip)</span>
-        </label>
-        <label class="file">
-          <input type="file" webkitdirectory directory multiple accept=".dds,image/*" @change="onFolderChange" />
-          <span>Load map folder</span>
-        </label>
-        <button class="file" v-if="heights && dirPickerSupported" @click="resolveFromFolder">
-          <span>Resolve assets from folder</span>
-        </button>
-        <label class="toggle" v-if="dirPickerSupported">
-          <input type="checkbox" v-model="autoResolveAfterSmf" />
-          <span>After .smf, pick folder to resolve assets</span>
-        </label>
-        <div class="status warn" v-if="errorMsg">Error: {{ errorMsg }}</div>
+    <aside class="sidebar right" v-if="showRightPanel">
+      <FileUploadPanel
+        :hasHeights="!!heights"
+        :dirPickerSupported="dirPickerSupported"
+        v-model:autoResolveAfterSmf="autoResolveAfterSmf"
+        :error="errorMsg"
+        @changeSmf="onFileChange"
+        @changePackage="onPackageChange"
+        @changeFolder="onFolderChange"
+        @changeMapinfo="onMapinfoFileChange"
+        @resolveFolder="resolveFromFolder"
+      />
+
+      <div class="section" v-show="!collapseDetection">
+        <h3 class="collapsible" @click="collapseDetection = !collapseDetection"><span class="twisty">{{ collapseDetection ? '▶' : '▼' }}</span> Detection</h3>
+        <div class="info">
+          <div><b>Files uploaded:</b></div><div>{{ uploadedFiles.length }}</div>
+          <div><b>mapinfo.lua:</b></div><div>{{ mapinfoPath || 'not found' }}</div>
+          <div><b>SMT files found:</b></div><div>{{ smtFilesFound.length }}</div>
+          <div v-if="smtFilesFound.length"><b>First SMT:</b></div><div v-if="smtFilesFound.length">{{ smtFilesFound[0] }}</div>
+          <div v-if="smtRefsFromMapinfo.length"><b>SMT refs (mapinfo):</b></div><div v-if="smtRefsFromMapinfo.length">{{ smtRefsFromMapinfo.join(', ') }}</div>
+        </div>
       </div>
 
-      <div class="section" v-if="header">
-        <h3>Map Info</h3>
+      <div class="section" v-if="mapinfoSummary" v-show="!collapseMapDefinition">
+        <h3 class="collapsible" @click="collapseMapDefinition = !collapseMapDefinition"><span class="twisty">{{ collapseMapDefinition ? '▶' : '▼' }}</span> Map Definition</h3>
+        <div class="info">
+          <div><b>Name:</b></div><div>{{ mapinfoSummary.name }}</div>
+          <div><b>Shortname:</b></div><div>{{ mapinfoSummary.shortname }}</div>
+          <div><b>Version:</b></div><div>{{ mapinfoSummary.version }}</div>
+          <div><b>Author:</b></div><div>{{ mapinfoSummary.author }}</div>
+          <div><b>Mapfile:</b></div><div>{{ mapinfoSummary.mapfile }}</div>
+        </div>
+      </div>
+
+      <div class="section" v-if="header" v-show="!collapseMapInfo">
+        <h3 class="collapsible" @click="collapseMapInfo = !collapseMapInfo"><span class="twisty">{{ collapseMapInfo ? '▶' : '▼' }}</span> Map Info</h3>
         <div class="info">
           <div><b>Size:</b> {{ header.width }}x{{ header.length }} squares</div>
           <div><b>Square:</b> {{ header.squareSize }}</div>
@@ -440,8 +1011,8 @@ watch(baseColorUrl, (newUrl) => {
         </div>
       </div>
 
-      <div class="section">
-        <h3>Display</h3>
+      <div class="section" v-show="!collapseDisplay">
+        <h3 class="collapsible" @click="collapseDisplay = !collapseDisplay"><span class="twisty">{{ collapseDisplay ? '▶' : '▼' }}</span> Display</h3>
         <label class="toggle">
           <input type="checkbox" v-model="showMetal" />
           <span>Metal</span>
@@ -456,16 +1027,92 @@ watch(baseColorUrl, (newUrl) => {
         </label>
       </div>
 
-      <div class="section">
-        <h3>Base Texture</h3>
+      <div class="section" v-show="!collapseBaseTexture">
+        <h3 class="collapsible" @click="collapseBaseTexture = !collapseBaseTexture"><span class="twisty">{{ collapseBaseTexture ? '▶' : '▼' }}</span> Base Texture</h3>
         <select v-model="baseColorUrl">
           <option :value="null">None</option>
           <option v-for="img in folderImages" :key="img.url" :value="img.url">{{ img.name }}</option>
         </select>
       </div>
 
-      <div class="section" v-if="folderImages.length">
-        <h3>Overlays</h3>
+      <div class="section" v-if="mapinfoJSON" v-show="!collapseMapinfoResources">
+        <h3 class="collapsible" @click="collapseMapinfoResources = !collapseMapinfoResources"><span class="twisty">{{ collapseMapinfoResources ? '▶' : '▼' }}</span> Mapinfo Resources</h3>
+        <label class="toggle">
+          <input type="checkbox" v-model="showOnlyResourceOverlays" />
+          <span>Show only overlays bound to mapinfo resources</span>
+        </label>
+        <button class="file" @click="
+          Object.entries(resourceSelections).forEach(([id, url]) => url && ensureOverlayByUrl(url as any, 1))
+        ">Enable all referenced</button>
+
+        <div class="resources">
+          <div class="res-group">
+            <div class="res-group-title">smf</div>
+            <div
+              v-for="key in (resourceKeys.smf as unknown as string[])"
+              :key="'smf.'+key"
+              class="res-item"
+            >
+              <div class="res-key">smf.{{ key }}</div>
+              <div class="res-path" :title="(mapinfoJSON?.smf && mapinfoJSON.smf[String(key)]) || '(none)'">
+                {{ (mapinfoJSON?.smf && mapinfoJSON.smf[String(key)]) || '(none)' }}
+              </div>
+              <select
+                v-model="resourceSelections['smf.' + String(key)]"
+                @change="onResourceSelected('smf.' + String(key))"
+              >
+                <option :value="''">(unbound)</option>
+                <option v-for="img in folderImages" :key="img.url" :value="img.url">{{ img.name }}</option>
+              </select>
+              <div class="res-actions">
+                <button class="small" @click="onResourceSelected('smf.' + String(key))" :disabled="!resourceSelections['smf.' + String(key)]">Enable overlay</button>
+                <button class="small" @click="baseColorUrl = (resourceSelections['smf.' + String(key)] as any)" :disabled="!resourceSelections['smf.' + String(key)]">Use as base</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="res-group">
+            <div class="res-group-title">resources</div>
+            <div
+              v-for="key in (resourceKeys.resources as unknown as string[])"
+              :key="'resources.'+key"
+              class="res-item"
+            >
+              <div class="res-key">resources.{{ key }}</div>
+              <div class="res-path" :title="(mapinfoJSON?.resources && mapinfoJSON.resources[String(key)]) || '(none)'">
+                {{ (mapinfoJSON?.resources && mapinfoJSON.resources[String(key)]) || '(none)' }}
+              </div>
+              <select
+                v-model="resourceSelections['resources.' + String(key)]"
+                @change="onResourceSelected('resources.' + String(key))"
+              >
+                <option :value="''">(unbound)</option>
+                <option v-for="img in folderImages" :key="img.url" :value="img.url">{{ img.name }}</option>
+              </select>
+              <div class="res-actions">
+                <button class="small" @click="onResourceSelected('resources.' + String(key))" :disabled="!resourceSelections['resources.' + String(key)]">Enable overlay</button>
+                <button
+                  class="small"
+                  v-if="key==='detailTex' || key==='splatDetailTex'"
+                  @click="baseColorUrl = (resourceSelections['resources.' + String(key)] as any)"
+                  :disabled="!resourceSelections['resources.' + String(key)]"
+                >
+                  Use as base
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section" v-if="mapinfoJSON" v-show="!collapseMapinfoJson">
+        <h3 class="collapsible" @click="collapseMapinfoJson = !collapseMapinfoJson"><span class="twisty">{{ collapseMapinfoJson ? '▶' : '▼' }}</span> mapinfo.lua (parsed)</h3>
+        <pre class="json-dump">{{ prettyMapinfo }}</pre>
+      </div>
+
+
+      <div class="section" v-if="folderImages.length" v-show="!collapseOverlays">
+        <h3 class="collapsible" @click="collapseOverlays = !collapseOverlays"><span class="twisty">{{ collapseOverlays ? '▶' : '▼' }}</span> Overlays</h3>
         <div class="overlays">
           <div v-for="ov in overlays" :key="ov.url" class="overlay-item">
             <label class="ov-label">
@@ -478,13 +1125,21 @@ watch(baseColorUrl, (newUrl) => {
       </div>
     </aside>
   </div>
+  <PerfDrawer :fps="fps ?? undefined" />
+  <StatusBar
+    :hasHeights="!!heights"
+    :files="uploadedFiles.length"
+    :mapName="mapinfoSummary?.name ?? ''"
+    :error="errorMsg"
+    :fps="fps ?? undefined"
+  />
 </template>
 
 <style scoped>
 .app {
   display: flex;
   width: 100vw;
-  height: 100vh;
+  height: calc(100vh - 40px - 28px); /* account for Toolbar (40px) + StatusBar (28px) */
   background: #0b0c0e;
   color: #ddd;
 }
@@ -507,16 +1162,29 @@ watch(baseColorUrl, (newUrl) => {
   border-radius: 6px;
   color: #bbb;
 }
+/* Base sidebar styling */
 .sidebar {
-  width: 320px;
-  min-width: 260px;
-  max-width: 420px;
   height: 100%;
   box-sizing: border-box;
-  border-left: 1px solid #222;
   background: #111214;
   padding: 12px;
   overflow: auto;
+}
+
+/* Left panel */
+.sidebar.left {
+  width: 320px;
+  min-width: 260px;
+  max-width: 420px;
+  border-right: 1px solid #222;
+}
+
+/* Right panel */
+.sidebar.right {
+  width: 520px;        /* enlarged right panel */
+  min-width: 420px;
+  max-width: 720px;
+  border-left: 1px solid #222;
 }
 .section {
   margin-bottom: 16px;
@@ -525,6 +1193,17 @@ watch(baseColorUrl, (newUrl) => {
   margin: 0 0 8px;
   font-size: 1rem;
   color: #9fb0ff;
+}
+h3.collapsible {
+  cursor: pointer;
+  user-select: none;
+}
+h3.collapsible .twisty {
+  display: inline-block;
+  width: 16px;
+  text-align: center;
+  color: #9fb0ff;
+  margin-right: 6px;
 }
 .toggle {
   display: flex;
@@ -588,12 +1267,132 @@ select {
   gap: 8px;
 }
 .ov-name {
-  max-width: 180px;
+  max-width: 240px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .ov-slider {
   width: 100%;
+}
+
+/* Mapinfo resource UI */
+.resources {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.res-group {
+  border: 1px solid #2a2a2a;
+  background: #15171b;
+  border-radius: 6px;
+  padding: 8px;
+}
+.res-group-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: #b8c6ff;
+}
+.res-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid #26282d;
+  background: #0f1115;
+  border-radius: 4px;
+  margin-bottom: 6px;
+}
+.res-key {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  color: #9ab0ff;
+  font-size: 0.9rem;
+}
+.res-path {
+  color: #9aa0aa;
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.res-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+button.small {
+  padding: 4px 8px;
+  font-size: 0.85rem;
+}
+
+/* File browser */
+.file-browser {
+  border: 1px solid #2a2a2a;
+  background: #15171b;
+  border-radius: 6px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 4px 0;
+}
+.fb-node {
+  margin-left: 0;
+}
+.fb-children {
+  margin-left: 16px;
+  border-left: 1px dashed #2a2a2a;
+}
+.fb-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #22252c;
+}
+.fb-row:last-child { border-bottom: none; }
+.fb-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #cfd4e6;
+  font-size: 12px;
+  cursor: default;
+}
+.twisty {
+  display: inline-block;
+  width: 16px;
+  text-align: center;
+  color: #9fb0ff;
+}
+.dir {
+  color: #b8c6ff;
+  font-weight: 600;
+}
+.file {
+  color: #d9e0ff;
+}
+.fb-tags {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.tag {
+  background: #0f1115;
+  border: 1px solid #2a2a2a;
+  color: #9fb0ff;
+  padding: 2px 6px;
+  border-radius: 10px;
+  font-size: 11px;
+}
+.json-dump {
+  background: #0f1115;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  padding: 8px;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  font-size: 12px;
+  color: #cfd4e6;
 }
 </style>

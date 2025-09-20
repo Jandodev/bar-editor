@@ -227,3 +227,19 @@ export function downsampleHeightField(
   }
   return { out, outW, outL };
 }
+
+/** Recompute float heights from uint16 heightmap with a given [min, max] range. */
+export function u16ToFloatHeights(
+  heightU16: Uint16Array,
+  minHeight: number,
+  maxHeight: number
+): Float32Array {
+  const count = heightU16.length;
+  const out = new Float32Array(count);
+  const scale = (maxHeight - minHeight) / 65535.0;
+  for (let i = 0; i < count; i++) {
+    const h = heightU16[i] ?? 0;
+    out[i] = minHeight + h * scale;
+  }
+  return out;
+}
