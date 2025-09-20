@@ -226,7 +226,7 @@ function buildMetalOverlay(geom: THREE.BufferGeometry) {
   // Build RGBA texture: red with alpha from metal density (0..255)
   const data = new Uint8Array(pxCount * 4)
   for (let i = 0; i < pxCount; i++) {
-    const a = metalU8[i] // already 0..255
+    const a = metalU8[i] ?? 0 // already 0..255
     const j = i * 4
     data[j + 0] = 255 // R
     data[j + 1] = 0   // G

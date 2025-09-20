@@ -2,6 +2,9 @@
 import { ref, computed, watch } from 'vue'
 import ThreeViewport from './components/ThreeViewport.vue'
 import { parseSMF, computeWorldSize, chooseStride, downsampleHeightField, type SMFParsed } from './lib/smf'
+import { resolveMapPackageFromZip } from './lib/archive'
+import { parseMapinfoLua } from './lib/mapinfo'
+import { pickDirectoryAndCollectFiles } from './lib/folder'
 
 const smf = ref<SMFParsed | null>(null)
 const errorMsg = ref<string | null>(null)
@@ -25,13 +28,16 @@ const baseColorUrl = ref<string | null>(null)
 const baseColorIsDDS = ref(false)
 
 // Overlay controls built from folder images
-type OverlayControl = { name: string; url: string; visible: boolean; opacity: number }
+type OverlayControl = { name: string; url: string; visible: boolean; opacity: number; isDDS?: boolean }
 const overlays = ref<OverlayControl[]>([])
 
 // Child ref for fullscreen API (still available if needed)
 const viewportRef = ref<InstanceType<typeof ThreeViewport> | null>(null)
 
 const header = computed(() => smf.value?.header)
+const mapinfoJSON = ref<any | null>(null)
+const autoResolveAfterSmf = ref(true)
+const dirPickerSupported = ref<boolean>(typeof (window as any) !== 'undefined' && !!(window as any).showDirectoryPicker)
 
 function revokeFolderUrls() {
   for (const e of folderImages.value) URL.revokeObjectURL(e.url)
@@ -45,7 +51,8 @@ function pickBaseTextureURL(entries: ImgEntry[]): string | null {
   // Prefer common base color names (including .dds)
   const prefer = /(base|diffuse|albedo|color|texture)\.(png|jpe?g|webp|bmp|tga|dds)$/i
   const found = entries.find(e => prefer.test(e.name))
-  return (found ?? entries[0]).url
+  const candidate = found ?? entries[0]
+  return candidate ? candidate.url : null
 }
 
 async function handleFiles(files: FileList | null) {
@@ -76,6 +83,13 @@ async function handleFiles(files: FileList | null) {
     heights.value = out
     gridW.value = outW
     gridL.value = outL
+    if (dirPickerSupported.value && autoResolveAfterSmf.value) {
+      try {
+        await resolveFromFolder()
+      } catch (e) {
+        console.warn('Folder resolve skipped:', e)
+      }
+    }
   } catch (err) {
     console.error(err)
     errorMsg.value = (err as Error).message || String(err)
@@ -111,6 +125,13 @@ const loadSMFFromFile = async (file: File): Promise<void> => {
     heights.value = out
     gridW.value = outW
     gridL.value = outL
+    if (dirPickerSupported.value && autoResolveAfterSmf.value) {
+      try {
+        await resolveFromFolder()
+      } catch (e) {
+        console.warn('Folder resolve skipped:', e)
+      }
+    }
   } catch (err) {
     console.error(err)
     errorMsg.value = (err as Error).message || String(err)
@@ -122,24 +143,34 @@ function onFileChange(e: Event) {
   handleFiles(input.files)
 }
 
-function onFolderChange(e: Event) {
+async function onFolderChange(e: Event) {
   const input = e.target as HTMLInputElement
   const files = input.files
   revokeFolderUrls()
   if (!files || files.length === 0) return
   const imgs: ImgEntry[] = []
   let foundSmf: File | null = null
+  let mapinfoFile: File | null = null
+
   for (let i = 0; i < files.length; i++) {
     const f = files.item(i)!
     const name = f.webkitRelativePath || f.name
+
     if (/\.smf$/i.test(name)) {
       foundSmf = f
+    }
+    if (/(^|\/)mapinfo\.lua$/i.test(name)) {
+      // Prefer root-level mapinfo.lua over maphelper/mapinfo.lua if both exist
+      if (!mapinfoFile || /^mapinfo\.lua$/i.test(name)) {
+        mapinfoFile = f
+      }
     }
     // Keep only image-like files (support DDS explicitly)
     if (/^image\//i.test(f.type) || /\.(png|jpe?g|webp|bmp|tga|dds)$/i.test(name)) {
       imgs.push({ name, url: URL.createObjectURL(f), file: f })
     }
   }
+
   // Sort for stable UI
   imgs.sort((a, b) => a.name.localeCompare(b.name))
   folderImages.value = imgs
@@ -158,11 +189,189 @@ function onFolderChange(e: Event) {
     isDDS: /\.dds$/i.test(img.file.name || img.name),
   }))
 
+  // Parse mapinfo.lua if present
+  if (mapinfoFile) {
+    try {
+      const txt = await mapinfoFile.text()
+      mapinfoJSON.value = parseMapinfoLua(txt)
+      console.info('Parsed mapinfo.lua (folder):', mapinfoJSON.value)
+    } catch (err) {
+      console.warn('Failed to parse folder mapinfo.lua:', err)
+      mapinfoJSON.value = null
+    }
+  } else {
+    mapinfoJSON.value = null
+  }
+
   // Auto-import .smf if present in the directory
   if (foundSmf) {
-    loadSMFFromFile(foundSmf)
+    await loadSMFFromFile(foundSmf)
   }
 }
+async function handlePackage(file: File) {
+  errorMsg.value = null
+  revokeFolderUrls()
+
+  const name = file.name || ''
+  const ext = name.toLowerCase().split('.').pop()
+  if (ext === 'sd7') {
+    errorMsg.value = 'SD7 (7z) not supported in browser yet. Convert to .sdz (zip) and retry.'
+    return
+  }
+  if (ext !== 'sdz' && ext !== 'zip' && ext !== 'smf') {
+    errorMsg.value = 'Unsupported package type. Please select a .sdz or .zip map package (or a .smf file).'
+    return
+  }
+
+  if (ext === 'smf') {
+    await loadSMFFromFile(file)
+    return
+  }
+
+  try {
+    const pkg = await resolveMapPackageFromZip(file)
+
+    // images -> folderImages/overlays
+    const imgs: ImgEntry[] = pkg.images.map(img => ({
+      name: img.path,
+      url: img.blobUrl,
+      file: new File([new Blob([])], img.path),
+    }))
+    imgs.sort((a, b) => a.name.localeCompare(b.name))
+    folderImages.value = imgs
+
+    baseColorUrl.value = pickBaseTextureURL(imgs)
+    const baseEntry = imgs.find(e => e.url === baseColorUrl.value)
+    baseColorIsDDS.value = !!baseEntry && /\.dds$/i.test(baseEntry?.file.name || baseEntry?.name)
+
+    overlays.value = imgs.map(img => ({
+      name: img.name,
+      url: img.url,
+      visible: true,
+      opacity: 1,
+      isDDS: /\.dds$/i.test(img.name),
+    }))
+
+    // parse SMF
+    const parsed = parseSMF(pkg.smfBuffer)
+    smf.value = parsed
+
+    const ws = computeWorldSize(parsed.header)
+    widthWorld.value = ws.widthWorld
+    lengthWorld.value = ws.lengthWorld
+
+    const segMax = Math.max(parsed.header.width, parsed.header.length)
+    const stride = chooseStride(segMax, 512)
+    strideUsed.value = stride
+
+    const { out, outW, outL } = downsampleHeightField(
+      parsed.heightFloat,
+      parsed.header.width,
+      parsed.header.length,
+      stride
+    )
+    heights.value = out
+    gridW.value = outW
+    gridL.value = outL
+
+    // parse mapinfo if present
+    if (pkg.mapinfoText) {
+      try {
+        mapinfoJSON.value = parseMapinfoLua(pkg.mapinfoText)
+        console.info('Parsed mapinfo.lua:', mapinfoJSON.value)
+      } catch (e) {
+        console.warn('Failed to parse mapinfo.lua:', e)
+        mapinfoJSON.value = null
+      }
+    } else {
+      mapinfoJSON.value = null
+    }
+  } catch (err) {
+    console.error(err)
+    errorMsg.value = (err as Error).message || String(err)
+  }
+}
+
+function onPackageChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const files = input.files
+  if (!files || files.length === 0) return
+  const f = files.item(0)!
+  handlePackage(f)
+}
+
+async function resolveFromFolder() {
+  if (!dirPickerSupported.value) {
+    errorMsg.value = 'Directory picker not supported. Use "Load map folder" instead.'
+    return
+  }
+  try {
+    const collected = await pickDirectoryAndCollectFiles()
+    // Build ImgEntry[] and detect .smf / mapinfo.lua
+    const imgs: ImgEntry[] = []
+    let foundSmf: File | null = null
+    let mapinfoFile: File | null = null
+
+    for (const item of collected) {
+      const name = item.path
+
+      if (/\.smf$/i.test(name)) {
+        // Prefer a maps/<name>.smf if multiple are present
+        if (!foundSmf || /^maps\/.+\.smf$/i.test(name)) {
+          foundSmf = item.file
+        }
+      }
+      if (/(^|\/)mapinfo\.lua$/i.test(name)) {
+        // Prefer root-level mapinfo.lua over maphelper/mapinfo.lua if both exist
+        if (!mapinfoFile || /^mapinfo\.lua$/i.test(name)) {
+          mapinfoFile = item.file
+        }
+      }
+      if (/\.(png|jpe?g|webp|bmp|tga|dds)$/i.test(name)) {
+        imgs.push({ name, url: URL.createObjectURL(item.file), file: item.file })
+      }
+    }
+
+    // Sort & apply images
+    imgs.sort((a, b) => a.name.localeCompare(b.name))
+    folderImages.value = imgs
+
+    baseColorUrl.value = pickBaseTextureURL(imgs)
+    const baseEntry = imgs.find(e => e.url === baseColorUrl.value)
+    baseColorIsDDS.value = !!baseEntry && /\.dds$/i.test(baseEntry?.file.name || baseEntry?.name)
+
+    overlays.value = imgs.map(img => ({
+      name: img.name,
+      url: img.url,
+      visible: true,
+      opacity: 1,
+      isDDS: /\.dds$/i.test(img.file.name || img.name),
+    }))
+
+    // Parse mapinfo.lua if present
+    if (mapinfoFile) {
+      try {
+        const txt = await mapinfoFile.text()
+        mapinfoJSON.value = parseMapinfoLua(txt)
+        console.info('Parsed mapinfo.lua (dir picker):', mapinfoJSON.value)
+      } catch (err) {
+        console.warn('Failed to parse directory mapinfo.lua:', err)
+        mapinfoJSON.value = null
+      }
+    } else {
+      mapinfoJSON.value = null
+    }
+
+    // If an SMF exists in folder, load it (even if one was already loaded)
+    if (foundSmf) {
+      await loadSMFFromFile(foundSmf)
+    }
+  } catch (err) {
+    console.error(err)
+    errorMsg.value = (err as Error).message || String(err)
+  }
+}
+
 watch(baseColorUrl, (newUrl) => {
   const baseEntry = folderImages.value.find(e => e.url === newUrl)
   baseColorIsDDS.value = !!baseEntry && /\.dds$/i.test(baseEntry?.file.name || baseEntry?.name)
@@ -204,8 +413,19 @@ watch(baseColorUrl, (newUrl) => {
           <span>Load .smf</span>
         </label>
         <label class="file">
+          <input type="file" accept=".sdz,.zip,.sd7" @change="onPackageChange" />
+          <span>Load map package (.sdz/.zip)</span>
+        </label>
+        <label class="file">
           <input type="file" webkitdirectory directory multiple accept=".dds,image/*" @change="onFolderChange" />
           <span>Load map folder</span>
+        </label>
+        <button class="file" v-if="heights && dirPickerSupported" @click="resolveFromFolder">
+          <span>Resolve assets from folder</span>
+        </button>
+        <label class="toggle" v-if="dirPickerSupported">
+          <input type="checkbox" v-model="autoResolveAfterSmf" />
+          <span>After .smf, pick folder to resolve assets</span>
         </label>
         <div class="status warn" v-if="errorMsg">Error: {{ errorMsg }}</div>
       </div>

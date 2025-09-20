@@ -160,7 +160,8 @@ export function parseSMF(buffer: ArrayBuffer): SMFParsed {
   const heightFloat = new Float32Array(hmCount);
   const scale = (maxHeight - minHeight) / 65535.0;
   for (let i = 0; i < hmCount; i++) {
-    heightFloat[i] = minHeight + heightU16[i] * scale;
+    const h = heightU16[i] ?? 0;
+    heightFloat[i] = minHeight + h * scale;
   }
 
   // Optional: Metal map reading
@@ -220,7 +221,8 @@ export function downsampleHeightField(
     const srcZ = z * stride;
     for (let x = 0; x < outW; x++) {
       const srcX = x * stride;
-      out[z * outW + x] = height[srcZ * (width + 1) + srcX];
+      const idx = srcZ * (width + 1) + srcX;
+      out[z * outW + x] = height[idx] ?? 0;
     }
   }
   return { out, outW, outL };
