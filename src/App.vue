@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import ThreeViewport from './components/ThreeViewport.vue'
 import { parseSMF, computeWorldSize, chooseStride, downsampleHeightField, u16ToFloatHeights, type SMFParsed } from './lib/smf'
 import { resolveMapPackageFromZip } from './lib/archive'
@@ -29,9 +29,104 @@ const fps = ref<number | null>(null)
 const fpsHovering = ref(false)
 const fpsPinned = ref(false)
 
-// Panel visibility
+/* Panel visibility */
 const showLeftPanel = ref(true)
 const showRightPanel = ref(true)
+// App container ref for width computation during drag
+const appRef = ref<HTMLDivElement | null>(null)
+
+/* Splitter width (must match CSS .divider flex-basis) */
+const DIV_W = 6
+
+// Panel widths (persisted)
+const parsePx = (v: string | null, fallback: number) => {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : fallback
+}
+
+const leftWidth = ref<number>(parsePx(localStorage.getItem('be.leftWidth'), 320))
+const rightWidth = ref<number>(parsePx(localStorage.getItem('be.rightWidth'), 520))
+
+const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n))
+
+/* No static clamping at init; allow full range and prevent crossing only at runtime */
+
+let dragSide: 'left' | 'right' | null = null
+let dragStartX = 0
+let dragStartWidth = 0
+
+function startDrag(side: 'left'|'right', e: MouseEvent) {
+  dragSide = side
+  dragStartX = e.clientX
+  dragStartWidth = side === 'left' ? leftWidth.value : rightWidth.value
+  window.addEventListener('mousemove', onDragMove)
+  window.addEventListener('mouseup', onDragEnd)
+  e.preventDefault()
+}
+
+function onDragMove(e: MouseEvent) {
+  if (!dragSide) return
+  const dx = e.clientX - dragStartX
+
+  // Compute dynamic bounds so panels never cross each other
+  const appW = appRef.value?.clientWidth || window.innerWidth
+  const reserved = (showLeftPanel.value ? DIV_W : 0) + (showRightPanel.value ? DIV_W : 0)
+  const available = Math.max(0, appW - reserved)
+
+  if (dragSide === 'left') {
+    const maxLeft = Math.max(0, available - (showRightPanel.value ? rightWidth.value : 0))
+    const next = dragStartWidth + dx
+    leftWidth.value = Math.min(Math.max(0, next), maxLeft)
+  } else {
+    const maxRight = Math.max(0, available - (showLeftPanel.value ? leftWidth.value : 0))
+    const next = dragStartWidth - dx
+    rightWidth.value = Math.min(Math.max(0, next), maxRight)
+  }
+  scheduleResizeEvent()
+}
+
+function onDragEnd() {
+  if (!dragSide) return
+  window.removeEventListener('mousemove', onDragMove)
+  window.removeEventListener('mouseup', onDragEnd)
+  localStorage.setItem('be.leftWidth', String(leftWidth.value))
+  localStorage.setItem('be.rightWidth', String(rightWidth.value))
+  // ensure final viewport resize
+  try { window.dispatchEvent(new Event('resize')) } catch {}
+  dragSide = null
+}
+
+onBeforeUnmount(() => {
+  window.removeEventListener('mousemove', onDragMove)
+  window.removeEventListener('mouseup', onDragEnd)
+})
+
+// Debounced resize events so ThreeViewport reflows while dragging
+let resizeTimer: number | null = null
+function scheduleResizeEvent() {
+  if (resizeTimer) window.clearTimeout(resizeTimer)
+  resizeTimer = window.setTimeout(() => {
+    try { window.dispatchEvent(new Event('resize')) } catch {}
+  }, 80)
+}
+
+/* Persist on change as well */
+watch(leftWidth, (v) => localStorage.setItem('be.leftWidth', String(v)))
+watch(rightWidth, (v) => localStorage.setItem('be.rightWidth', String(v)))
+
+/* When panels are shown/hidden, trigger a debounced resize so ThreeViewport recalculates */
+watch(showLeftPanel, (v) => {
+  if (!v && dragSide === 'left') onDragEnd()
+  // Fire after layout updates to avoid any transient overlap, plus a debounced follow-up.
+  requestAnimationFrame(() => { try { window.dispatchEvent(new Event('resize')) } catch {} })
+  scheduleResizeEvent()
+})
+watch(showRightPanel, (v) => {
+  if (!v && dragSide === 'right') onDragEnd()
+  // Fire after layout updates to avoid any transient overlap, plus a debounced follow-up.
+  requestAnimationFrame(() => { try { window.dispatchEvent(new Event('resize')) } catch {} })
+  scheduleResizeEvent()
+})
 
 // Top-bar hidden inputs for quick load actions
 const smfInputTop = ref<HTMLInputElement | null>(null)
@@ -954,8 +1049,8 @@ export default defineComponent({
     <input ref="folderInputTop" type="file" webkitdirectory directory multiple @change="onFolderChange" style="display:none" />
     <input ref="mapinfoInputTop" type="file" accept=".lua" @change="onMapinfoFileChange" style="display:none" />
   </Toolbar>
-  <div class="app">
-    <aside class="sidebar left" v-if="showLeftPanel">
+  <div class="app" ref="appRef">
+    <aside class="sidebar left" v-if="showLeftPanel" :style="{ width: leftWidth + 'px' }">
       <div class="section" v-if="uploadedFiles.length">
         <h3 class="collapsible" @click="collapseFilesLeft = !collapseFilesLeft"><span class="twisty">{{ collapseFilesLeft ? '▶' : '▼' }}</span> Files <span class="header-actions"><button class="small" @click.stop="expandAllFiles()">Expand all</button><button class="small" @click.stop="collapseAllFiles()">Collapse all</button></span></h3>
         <div class="file-browser" v-show="!collapseFilesLeft">
@@ -973,6 +1068,7 @@ export default defineComponent({
         </div>
       </div>
     </aside>
+    <div v-if="showLeftPanel" class="divider divider-left" @mousedown="(e) => startDrag('left', e)"></div>
     <div class="main">
       <div v-if="!heights" class="empty">
         <p>Select an .smf file to visualize the heightmap.</p>
@@ -1000,7 +1096,9 @@ export default defineComponent({
       />
     </div>
 
-    <aside class="sidebar right" v-if="showRightPanel">
+    <div v-if="showRightPanel" class="divider divider-right" @mousedown="(e) => startDrag('right', e)"></div>
+
+    <aside class="sidebar right" v-if="showRightPanel" :style="{ width: rightWidth + 'px' }">
 
       <div class="section">
         <h3 class="collapsible" @click="collapseDetection = !collapseDetection"><span class="twisty">{{ collapseDetection ? '▶' : '▼' }}</span> Detection</h3>
@@ -1179,6 +1277,8 @@ export default defineComponent({
   display: flex;
   align-items: stretch;
   justify-content: stretch;
+  overflow: hidden; /* prevent viewport canvas from bleeding under side panels */
+  z-index: 1; /* keep main below sidebars */
 }
 .empty {
   position: absolute;
@@ -1198,13 +1298,13 @@ export default defineComponent({
   background: #111214;
   padding: 12px;
   overflow: auto;
+  position: relative; /* enable z-index */
+  z-index: 2; /* ensure sidebars paint above the main viewport */
 }
 
 /* Left panel */
 .sidebar.left {
   width: 320px;
-  min-width: 260px;
-  max-width: 420px;
   border-right: 1px solid #222;
   display: flex;
   flex-direction: column;
@@ -1213,9 +1313,7 @@ export default defineComponent({
 
 /* Right panel */
 .sidebar.right {
-  width: 520px;        /* enlarged right panel */
-  min-width: 420px;
-  max-width: 720px;
+  width: 520px;        /* default right panel */
   border-left: 1px solid #222;
 }
 .section {
@@ -1450,5 +1548,35 @@ button.small {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
   font-size: 12px;
   color: #cfd4e6;
+}
+/* Splitter dividers */
+.divider {
+  flex: 0 0 6px;
+  cursor: grab;
+  user-select: none;
+  position: relative;
+  background: transparent;
+  z-index: 3; /* dividers above everything for interactions */
+}
+.divider::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background: #222;
+}
+.divider:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.divider:active {
+  cursor: grabbing;
+}
+.divider-left {
+  border-right: 1px solid #222;
+}
+.divider-right {
+  border-left: 1px solid #222;
 }
 </style>
