@@ -31,6 +31,8 @@ const state = reactive({
   overlays: [] as any[],
   env: undefined as any,
   screenRotationQuarter: 0,
+  images: [] as any[],
+  atlasMode: false,
 })
 
 let unsubs: Array<() => void> = []
@@ -69,9 +71,14 @@ onMounted(() => {
   const updateEnv = (v: any) => {
     state.env = v || undefined
   }
+  const updateImages = (v: any) => {
+    state.images = Array.isArray(v) ? v : []
+  }
   const updateOrtho = (v: any) => {
     const q = v && typeof v.screenRotationQuarter !== 'undefined' ? v.screenRotationQuarter : 0
     state.screenRotationQuarter = Number((((q as number) % 4) + 4) % 4)
+    const view = v && typeof v.view === 'string' ? String(v.view) : 'terrain'
+    state.atlasMode = view === 'atlas'
   }
 
   // initial snapshot
@@ -81,6 +88,7 @@ onMounted(() => {
   updateDisp(bus.get('display'))
   updateOverlays(bus.get('overlays'))
   updateEnv(bus.get('env'))
+  updateImages(bus.get('images'))
   updateOrtho(bus.get('ortho'))
 
   // subscribe to updates
@@ -91,6 +99,7 @@ onMounted(() => {
     bus.subscribe('display', updateDisp as any),
     bus.subscribe('overlays', updateOverlays as any),
     bus.subscribe('env', updateEnv as any),
+    bus.subscribe('images', updateImages as any),
     bus.subscribe('ortho', updateOrtho as any),
   ]
 })
@@ -122,6 +131,6 @@ onBeforeUnmount(() => {
     :showGrid="state.showGrid"
     :overlays="state.overlays"
     :env="state.env"
-    v-bind="mode === 'orthographic' ? { screenRotationQuarter: state.screenRotationQuarter } : {}"
+    v-bind="mode === 'orthographic' ? { screenRotationQuarter: state.screenRotationQuarter, atlasMode: state.atlasMode, atlasImages: state.images } : {}"
   />
 </template>

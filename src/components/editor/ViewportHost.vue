@@ -39,12 +39,23 @@ function onTopButtonClick() {
     props.bus.set('display', { ...display, showGrid: !(display.showGrid ?? true) })
   }
 }
+
+function onAtlasToggle() {
+  if (props.pluginId !== 'orthographic') return
+  const ortho = (props.bus.get('ortho') as any) || {}
+  const view = String(ortho.view || 'terrain')
+  const next = view === 'atlas' ? 'terrain' : 'atlas'
+  props.bus.set('ortho', { ...ortho, view: next })
+}
 </script>
 
 <template>
   <div class="viewport-host">
     <div class="overlay">
-      <button class="overlay-btn" @click="onTopButtonClick">{{ buttonLabel ?? 'Toggle Grid' }}</button>
+      <div class="btn-row">
+        <button class="overlay-btn" @click="onTopButtonClick">{{ buttonLabel ?? (pluginId === 'orthographic' ? 'Rotate 90°' : 'Toggle Grid') }}</button>
+        <button v-if="pluginId === 'orthographic'" class="overlay-btn" @click="onAtlasToggle">Toggle Atlas</button>
+      </div>
     </div>
     <div class="mount" ref="mountEl"></div>
   </div>
@@ -81,5 +92,9 @@ function onTopButtonClick() {
 }
 .overlay-btn:hover {
   background: rgba(34, 36, 44, 0.95);
+}
+.btn-row {
+  display: inline-flex;
+  gap: 6px;
 }
 </style>

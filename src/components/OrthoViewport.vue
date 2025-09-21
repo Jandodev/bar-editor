@@ -47,6 +47,8 @@ type Props = {
     fogColor?: [number, number, number]
   }
   screenRotationQuarter?: number
+  atlasMode?: boolean
+  atlasImages?: { name: string; url: string; isDDS?: boolean }[]
 }
 
 const props = defineProps<Props>()
@@ -75,6 +77,127 @@ let imgLayers: ImgLayer[] = []
 
 // Base color texture
 let baseTex: THREE.Texture | THREE.CompressedTexture | null = null
+
+// Atlas (textures grid) resources
+type AtlasItem = {
+  mesh: THREE.Mesh
+  mat: THREE.MeshBasicMaterial
+  tex: THREE.Texture | THREE.CompressedTexture
+  label?: THREE.Sprite
+}
+let atlasItems: AtlasItem[] = []
+
+function disposeAtlas() {
+  if (!scene) return
+  for (const it of atlasItems) {
+    try { scene!.remove(it.mesh) } catch {}
+    try { it.mat.dispose() } catch {}
+    try { (it.tex as any)?.dispose?.() } catch {}
+    if (it.label) {
+      try { scene!.remove(it.label) } catch {}
+      try { ((it.label.material as any)?.map)?.dispose?.() } catch {}
+      try { (it.label.material as any)?.dispose?.() } catch {}
+    }
+  }
+  atlasItems = []
+}
+
+function makeLabelSprite(text: string, scale: number): THREE.Sprite {
+  const canvas = document.createElement('canvas')
+  canvas.width = 512
+  canvas.height = 128
+  const ctx = canvas.getContext('2d')!
+  ctx.fillStyle = 'rgba(0,0,0,0.6)'
+  ctx.fillRect(0, 0, canvas.width, canvas.height)
+  ctx.font = 'bold 48px sans-serif'
+  ctx.fillStyle = '#ffffff'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(text, canvas.width / 2, canvas.height / 2)
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.colorSpace = THREE.SRGBColorSpace
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false })
+  const sprite = new THREE.Sprite(mat)
+  // scale in world units (X/Z are world-plane dimensions)
+  sprite.scale.set(scale, scale * (canvas.height / canvas.width), 1)
+  return sprite
+}
+
+function buildAtlasScene() {
+  if (!scene) return
+  disposeAtlas()
+  const imgs = Array.isArray(props.atlasImages) ? props.atlasImages! : []
+  if (!imgs.length) return
+
+  const n = imgs.length
+  const cols = Math.max(1, Math.ceil(Math.sqrt(n)))
+  const rows = Math.max(1, Math.ceil(n / cols))
+  const tileW = Math.max(1e-3, props.widthWorld / cols)
+  const tileL = Math.max(1e-3, props.lengthWorld / rows)
+
+  const cx = props.widthWorld * 0.5
+  const cz = props.lengthWorld * 0.5
+  const originX = cx - props.widthWorld * 0.5
+  const originZ = cz - props.lengthWorld * 0.5
+
+  for (let i = 0; i < n; i++) {
+    const img = imgs[i]
+    if (!img || typeof (img as any).url !== 'string' || !(img as any).url) continue
+    const col = i % cols
+    const row = Math.floor(i / cols)
+    const centerX = originX + (col + 0.5) * tileW
+    const centerZ = originZ + (row + 0.5) * tileL
+
+    const geom = new THREE.PlaneGeometry(tileW * 0.95, tileL * 0.95, 1, 1)
+    geom.rotateX(-Math.PI / 2)
+
+    const placeholder = createPlaceholderTexture(4)
+    const mat = new THREE.MeshBasicMaterial({
+      map: placeholder as any,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    })
+
+    loadAnyTexture(
+      img.url,
+      (loaded) => {
+        ;(loaded as any).colorSpace = /\.dds$/i.test(img.name) ? THREE.NoColorSpace : THREE.SRGBColorSpace
+        ;(loaded as any).wrapS = THREE.ClampToEdgeWrapping
+        ;(loaded as any).wrapT = THREE.ClampToEdgeWrapping
+        ;(loaded as any).flipY = true
+        mat.map = loaded as any
+        mat.needsUpdate = true
+        try { placeholder.dispose() } catch {}
+      },
+      (err: unknown) => {
+        console.warn('Atlas texture load error:', img.name, err)
+      },
+      /\.dds$/i.test(img.name),
+      /\.tga$/i.test(img.name)
+    )
+
+    const mesh = new THREE.Mesh(geom, mat)
+    mesh.position.set(centerX, 0.02, centerZ)
+    scene.add(mesh)
+
+    const labelText = (() => {
+      try {
+        const nm = String((img as any).name ?? '')
+        if (nm) return nm.split(/[\\/]/).pop() || nm
+        const u = String((img as any).url ?? '')
+        return u ? (u.split(/[\\/]/).pop() || u) : 'image'
+      } catch {
+        return 'image'
+      }
+    })()
+    const label = makeLabelSprite(labelText, Math.min(tileW, tileL) * 0.25)
+    label.position.set(centerX, 0.05, centerZ - tileL * 0.4)
+    scene.add(label)
+
+    atlasItems.push({ mesh, mat, tex: placeholder as any, label })
+  }
+}
 
 // Fullscreen state to adjust layout height
 const isFullscreen = ref(false)
@@ -202,6 +325,12 @@ function loadAnyTexture(
   isDDSHint?: boolean,
   isTGAHint?: boolean
 ): THREE.Texture | THREE.CompressedTexture {
+  // Defensive: guard against falsy/invalid URL
+  if (!url || typeof url !== 'string') {
+    const placeholder = createPlaceholderTexture()
+    try { onLoad(placeholder) } catch {}
+    return placeholder
+  }
   if (isDDSHint === true || isDDS(url)) {
     if (!ddsSupported()) {
       console.warn('DDS not supported by GPU/browser; using placeholder for:', url)
@@ -366,10 +495,10 @@ function buildImageOverlays(geom: THREE.BufferGeometry) {
         try { placeholder.dispose() } catch {}
       },
       (err: unknown) => {
-        console.warn('Failed to load overlay texture:', ov.name, err)
+        console.warn('Failed to load overlay texture:', ov?.name ?? ov?.url ?? '(unknown)', err)
       },
       ov.isDDS === true,
-      /\.tga$/i.test(ov.name)
+      /\.tga$/i.test(String((ov as any)?.name ?? (ov as any)?.url ?? ''))
     )
 
     const m = new THREE.Mesh(geom, mat)
@@ -381,6 +510,28 @@ function buildImageOverlays(geom: THREE.BufferGeometry) {
 
 function buildMesh() {
   if (!scene) return
+
+  // Atlas mode: show all textures as a grid of quads with labels
+  if (props.atlasMode) {
+    // Dispose terrain-related resources
+    if (mesh) {
+      disposeMetal()
+      disposeImgLayers()
+      try { mesh.geometry.dispose() } catch {}
+      try { (mesh.material as THREE.Material).dispose() } catch {}
+      scene.remove(mesh)
+      mesh = null
+    }
+    if (grid) {
+      scene.remove(grid)
+      grid = null
+    }
+    buildAtlasScene()
+    return
+  }
+
+  // Ensure previous atlas objects are removed when switching back
+  disposeAtlas()
   if (mesh) {
     disposeMetal()
     disposeImgLayers()
@@ -395,6 +546,24 @@ function buildMesh() {
   }
 
   const { widthWorld, lengthWorld, gridW, gridL, heights } = props
+
+  // Defensive: if geometry inputs are invalid, clear terrain/overlays and exit (atlas handled earlier)
+  if (!heights || !Number.isFinite(gridW) || !Number.isFinite(gridL) || gridW < 2 || gridL < 2) {
+    disposeMetal()
+    disposeImgLayers()
+    if (mesh) {
+      try { mesh.geometry.dispose() } catch {}
+      try { (mesh.material as THREE.Material).dispose() } catch {}
+      try { scene.remove(mesh) } catch {}
+      mesh = null
+    }
+    if (grid) {
+      try { scene.remove(grid) } catch {}
+      grid = null
+    }
+    return
+  }
+
   const segX = Math.max(1, gridW - 1)
   const segZ = Math.max(1, gridL - 1)
 
@@ -613,6 +782,15 @@ watch(
   () => {
     if (!mesh) return
     buildImageOverlays(mesh.geometry)
+  },
+  { deep: true }
+)
+
+// Rebuild when atlas mode/images change
+watch(
+  () => [props.atlasMode, props.atlasImages],
+  () => {
+    buildMesh()
   },
   { deep: true }
 )

@@ -202,6 +202,12 @@ function loadAnyTexture(
   isDDSHint?: boolean,
   isTGAHint?: boolean
 ): THREE.Texture | THREE.CompressedTexture {
+  // Defensive: bad/empty URL => return placeholder and avoid loader crashes
+  if (!url || typeof url !== 'string') {
+    const placeholder = createPlaceholderTexture()
+    try { onLoad(placeholder) } catch {}
+    return placeholder
+  }
   if (isDDSHint === true || isDDS(url)) {
     if (!ddsSupported()) {
       console.warn('DDS not supported by GPU/browser; using placeholder for:', url)
@@ -352,6 +358,7 @@ function buildImageOverlays(geom: THREE.BufferGeometry) {
 
   let order = 2
   for (const ov of props.overlays) {
+    if (!ov || typeof ov !== 'object') continue
     if (!ov.visible) continue
     if (!ov.url) continue
 
@@ -387,7 +394,7 @@ function buildImageOverlays(geom: THREE.BufferGeometry) {
         console.warn('Failed to load overlay texture:', ov.name, err)
       },
       ov.isDDS === true,
-      /\.tga$/i.test(ov.name)
+      /\.tga$/i.test(String((ov as any)?.name ?? (ov as any)?.url ?? ''))
     )
 
     const mesh = new THREE.Mesh(geom, mat)
@@ -399,6 +406,25 @@ function buildImageOverlays(geom: THREE.BufferGeometry) {
 
 function buildMesh() {
   if (!scene) return
+  // Defensive: if geometry inputs are invalid, clear terrain/overlays and exit
+  const gw = (props as any).gridW
+  const gl = (props as any).gridL
+  const hh = (props as any).heights as Float32Array | null | undefined
+  if (!hh || !Number.isFinite(gw) || !Number.isFinite(gl) || gw < 2 || gl < 2) {
+    disposeMetal()
+    disposeImgLayers()
+    if (mesh) {
+      try { mesh.geometry.dispose() } catch {}
+      try { (mesh.material as THREE.Material).dispose() } catch {}
+      try { scene.remove(mesh) } catch {}
+      mesh = null
+    }
+    if (grid) {
+      try { scene.remove(grid) } catch {}
+      grid = null
+    }
+    return
+  }
   // Dispose previous
   if (mesh) {
     // Note: overlays share geometry; dispose them first to avoid double-dispose issues.

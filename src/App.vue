@@ -349,6 +349,16 @@ watch(envFromMapinfo, (v) => {
   bus.set('env', v || undefined)
 }, { immediate: true, deep: true })
 
+// Publish available images to the bus for atlas view
+watch(folderImages, (imgs) => {
+  const list = Array.isArray(imgs) ? imgs.map((img) => ({
+    name: img.name,
+    url: img.url,
+    isDDS: /\.dds$/i.test(img.file.name || img.name),
+  })) : []
+  bus.set('images', list)
+}, { immediate: true, deep: true })
+
 const autoResolveAfterSmf = ref(false)
 const dirPickerSupported = ref<boolean>(typeof (window as any) !== 'undefined' && !!(window as any).showDirectoryPicker)
 
