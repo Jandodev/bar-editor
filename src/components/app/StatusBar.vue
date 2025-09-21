@@ -6,6 +6,8 @@ const props = defineProps<{
   error?: string | null
   fps?: number
 }>()
+
+const emit = defineEmits<{ (e: 'fpsHover', hovering: boolean): void; (e: 'fpsClick'): void }>()
 </script>
 
 <template>
@@ -17,7 +19,14 @@ const props = defineProps<{
       <span class="sep">•</span>
       <span class="item">Files: {{ files }}</span>
       <span class="sep">•</span>
-      <span class="item">FPS: {{ typeof fps === 'number' ? fps : '--' }}</span>
+      <span
+        class="item"
+        @mouseenter="emit('fpsHover', true)"
+        @mouseleave="emit('fpsHover', false)"
+        @click="emit('fpsClick')"
+      >
+        FPS: {{ typeof fps === 'number' ? fps : '--' }}
+      </span>
       <span v-if="mapName" class="sep">•</span>
       <span v-if="mapName" class="item">Map: {{ mapName }}</span>
     </div>

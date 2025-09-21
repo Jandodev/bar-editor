@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, watch, onMounted, onBeforeUnmount, computed } from 'vue'
 
 const props = defineProps<{
   fps?: number
+  peek?: boolean
 }>()
 
 const expanded = ref(false)
@@ -141,21 +142,21 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="perf" :class="{ expanded }">
-    <div class="header" @click="expanded = !expanded">
+  <div class="perf" :class="{ expanded, peek: props.peek }">
+    <div class="header" v-if="!props.peek" @click="expanded = !expanded">
       <span class="title">Performance</span>
       <span class="dot">•</span>
       <span class="metric">FPS: {{ typeof fps === 'number' ? fps : '--' }}</span>
       <span class="spacer" />
       <span class="chev">{{ expanded ? '▼' : '▲' }}</span>
     </div>
-    <div class="body" v-show="expanded">
+    <div class="body" v-show="expanded || props.peek">
       <div class="stats">
         <div>Min: {{ min ?? '--' }}</div>
         <div>Avg: {{ avg ?? '--' }}</div>
         <div>Max: {{ max ?? '--' }}</div>
       </div>
-      <canvas ref="canvasRef" width="340" height="120"></canvas>
+      <canvas ref="canvasRef" :width="props.peek ? 220 : 340" :height="props.peek ? 60 : 120"></canvas>
     </div>
   </div>
 </template>
@@ -174,6 +175,15 @@ onBeforeUnmount(() => {
   box-shadow: 0 6px 16px rgba(0,0,0,0.4);
   backdrop-filter: blur(2px);
   overflow: hidden;
+}
+.perf.peek {
+  width: 240px;
+}
+.perf.peek .body {
+  padding: 6px 8px 8px;
+}
+.perf.peek canvas {
+  height: 60px;
 }
 
 .header {
