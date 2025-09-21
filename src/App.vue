@@ -9,6 +9,8 @@ import { parseSMF, computeWorldSize, chooseStride, downsampleHeightField, u16ToF
 import { resolveMapPackageFromZip } from './lib/archive'
 import { parseMapinfoLua } from './lib/mapinfo'
 import { pickDirectoryAndCollectFiles } from './lib/folder'
+import { buildFlatSMFBuffer } from './lib/smf-writer'
+import { saveBytesDialog, saveTextDialog } from './lib/save'
 import Toolbar from './components/app/Toolbar.vue'
 import StatusBar from './components/app/StatusBar.vue'
 import PerfDrawer from './components/app/PerfDrawer.vue'
@@ -154,6 +156,7 @@ function toggleRightPanel() { showRightPanel.value = !showRightPanel.value }
 // Collapsible sections (left/right panels)
 const collapseFilesLeft = ref(false)
 const collapseDetection = ref(false)
+const collapseNewFlat = ref(false)
 const collapseMapDefinition = ref(false)
 const collapseMapInfo = ref(false)
 const collapseDisplay = ref(false)
@@ -171,6 +174,84 @@ const baseColorIsDDS = ref(false)
 // Overlay controls built from folder images
 type OverlayControl = { name: string; url: string; visible: boolean; opacity: number; isDDS?: boolean }
 const overlays = ref<OverlayControl[]>([])
+
+// New flat SMF generation controls
+const newMapW = ref<number>(512)          // squares (X)
+const newMapL = ref<number>(512)          // squares (Z)
+const newMapSquare = ref<number>(8)       // world units per square
+const newMapMin = ref<number>(0)
+const newMapMax = ref<number>(1)
+const newMapFlatU16 = ref<number>(0)      // 0..65535
+
+async function generateFlatSMF(saveOnly = true) {
+  try {
+    const buf = buildFlatSMFBuffer({
+      width: Math.max(1, Math.floor(newMapW.value || 1)),
+      length: Math.max(1, Math.floor(newMapL.value || 1)),
+      squareSize: Math.max(1, Math.floor(newMapSquare.value || 8)),
+      texelsPerSquare: 8,
+      tileSize: 32,
+      minHeight: Number(newMapMin.value),
+      maxHeight: Number(newMapMax.value),
+      flatHeightU16: Math.max(0, Math.min(65535, Math.floor(newMapFlatU16.value || 0))),
+    })
+    // Offer to save as maps/flat.smf (user can change the folder)
+    await saveBytesDialog('flat.smf', buf, 'application/octet-stream')
+
+    if (!saveOnly) {
+      // Also load into the editor immediately
+      const file = new File([new Blob([buf])], 'flat.smf', { type: 'application/octet-stream' })
+      await loadSMFFromFile(file)
+    }
+  } catch (e) {
+    console.warn('Flat SMF generation failed:', e)
+    errorMsg.value = (e as Error).message || String(e)
+  }
+}
+
+async function exportMapinfoWithSMF() {
+  try {
+    // Build a minimal mapinfo that points to maps/flat.smf; merge current env if available
+    const m: any = {
+      name: mapinfoSummary.value?.name || 'Blank Generic Map',
+      shortname: 'BLNK',
+      version: 'v0.1',
+      author: 'BAR Editor',
+      description: 'Mapinfo exported from editor with SMF reference.',
+      mapfile: 'maps/flat.smf',
+      smf: {
+        minimapTex: 'textures/minimap.svg',
+        metalmapTex: 'textures/metalmap.svg',
+        typemapTex: 'textures/typemap.svg',
+        grassmapTex: 'textures/grassmap.svg',
+      },
+      resources: {
+        detailTex: 'textures/detail.svg',
+        splatDetailTex: 'textures/splatDetail.svg',
+      },
+    }
+    // If current env exists, carry over basic values
+    const env = envFromMapinfo.value as any
+    if (env) {
+      m.lighting = { groundAmbientColor: env.ambient || [0.4, 0.4, 0.4], sunDir: env.sunDir || [0.5, 1.0, 0.3] }
+      m.atmosphere = {
+        sunColor: env.sunColor || [1.0, 0.95, 0.9],
+        skyColor: env.skyColor || [0.04, 0.05, 0.06],
+        fogStart: env.fogStart ?? 0.1,
+        fogEnd: env.fogEnd ?? 1.0,
+        fogColor: env.fogColor || [0.02, 0.02, 0.025],
+      }
+    }
+    const text = 'return ' + JSON.stringify(m, null, 2)
+      .replace(/"([^"]+)":/g, '$1:')       // unquote keys
+      .replace(/true|false|null/g, (m)=>m) // keep literals
+      .replace(/"/g, '"')                  // normalize quotes (kept as JSON-style inside values)
+    await saveTextDialog('mapinfo.lua', text, 'text/plain')
+  } catch (e) {
+    console.warn('Export mapinfo.lua failed:', e)
+    errorMsg.value = (e as Error).message || String(e)
+  }
+}
 
 // Full file browser of uploaded content
 type UploadedEntry = { path: string; url?: string; isImage: boolean; isDDS: boolean; file?: File }
@@ -1140,6 +1221,28 @@ export default defineComponent({
     <div v-if="showRightPanel" class="divider divider-right" @mousedown="(e) => startDrag('right', e)"></div>
 
     <aside class="sidebar right" v-if="showRightPanel" :style="{ width: rightWidth + 'px' }">
+
+      <div class="section">
+        <h3 class="collapsible" @click="collapseNewFlat = !collapseNewFlat"><span class="twisty">{{ collapseNewFlat ? '▶' : '▼' }}</span> New Flat Map (SMF)</h3>
+        <div class="info" v-show="!collapseNewFlat" style="display:flex; flex-direction:column; gap:8px;">
+          <div style="display:grid; grid-template-columns:auto 1fr auto 1fr; gap:6px 10px; align-items:center;">
+            <label>Width (squares)</label><input type="number" v-model.number="newMapW" min="1" step="1" />
+            <label>Length (squares)</label><input type="number" v-model.number="newMapL" min="1" step="1" />
+            <label>Square Size</label><input type="number" v-model.number="newMapSquare" min="1" step="1" />
+            <label>Min Height</label><input type="number" v-model.number="newMapMin" step="0.1" />
+            <label>Max Height</label><input type="number" v-model.number="newMapMax" step="0.1" />
+            <label>Flat U16 (0..65535)</label><input type="number" v-model.number="newMapFlatU16" min="0" max="65535" step="1" />
+          </div>
+          <div style="display:flex; gap:8px;">
+            <button class="small" @click="generateFlatSMF(true)">Generate Flat SMF (save)</button>
+            <button class="small" @click="generateFlatSMF(false)">Generate & Load</button>
+            <button class="small" @click="exportMapinfoWithSMF()">Export mapinfo.lua -> mapfile=maps/flat.smf</button>
+          </div>
+          <div class="status warn" v-if="Number(newMapMax) <= Number(newMapMin)">
+            maxHeight should be greater than minHeight (current: {{ newMapMin }}..{{ newMapMax }})
+          </div>
+        </div>
+      </div>
 
       <div class="section">
         <h3 class="collapsible" @click="collapseDetection = !collapseDetection"><span class="twisty">{{ collapseDetection ? '▶' : '▼' }}</span> Detection</h3>
