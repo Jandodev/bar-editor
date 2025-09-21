@@ -46,6 +46,7 @@ type Props = {
     fogEnd?: number
     fogColor?: [number, number, number]
   }
+  screenRotationQuarter?: number
 }
 
 const props = defineProps<Props>()
@@ -54,7 +55,7 @@ const emit = defineEmits<{ (e: 'fps', fps: number): void }>()
 const container = ref<HTMLDivElement | null>(null)
 let renderer: THREE.WebGLRenderer | null = null
 let scene: THREE.Scene | null = null
-let camera: THREE.PerspectiveCamera | null = null
+let camera: THREE.OrthographicCamera | null = null
 let controls: OrbitControls | null = null
 let mesh: THREE.Mesh | null = null
 let grid: THREE.GridHelper | null = null
@@ -129,7 +130,6 @@ function isTGA(url: string | null | undefined): boolean {
 function ddsSupported(): boolean {
   const gl: any = renderer?.getContext?.()
   if (!gl) return true
-  // Broad set of common compressed texture extensions
   const hasS3TC =
     gl.getExtension('WEBGL_compressed_texture_s3tc') ||
     gl.getExtension('WEBKIT_WEBGL_compressed_texture_s3tc') ||
@@ -206,14 +206,12 @@ function loadAnyTexture(
     if (!ddsSupported()) {
       console.warn('DDS not supported by GPU/browser; using placeholder for:', url)
       const placeholder = createPlaceholderTexture()
-      // still call onLoad so the caller can attach the texture
       try { onLoad(placeholder) } catch {}
       return placeholder
     }
     return new DDSLoader().load(
       url,
       (tex: THREE.CompressedTexture) => {
-        console.info('DDS loaded:', url)
         onLoad(tex)
       },
       undefined,
@@ -226,10 +224,7 @@ function loadAnyTexture(
   if (isTGAHint === true || isTGA(url)) {
     return new TGALoader().load(
       url,
-      (tex: THREE.Texture) => {
-        console.info('TGA loaded:', url)
-        onLoad(tex)
-      },
+      (tex: THREE.Texture) => onLoad(tex),
       undefined,
       (err: unknown) => {
         console.error('TGA load error:', url, err)
@@ -239,10 +234,7 @@ function loadAnyTexture(
   }
   return new THREE.TextureLoader().load(
     url,
-    (tex: THREE.Texture) => {
-      console.info('Image loaded:', url)
-      onLoad(tex)
-    },
+    (tex: THREE.Texture) => onLoad(tex),
     undefined,
     (err: unknown) => {
       console.error('Image load error:', url, err)
@@ -257,7 +249,6 @@ function applyBaseTexture(mat: THREE.MeshStandardMaterial) {
     mat.needsUpdate = true
     return
   }
-  // Use a tiny placeholder first; swap in real texture when it finishes loading.
   const placeholder = createPlaceholderTexture(2)
   baseTex = placeholder
   mat.map = placeholder
@@ -266,7 +257,6 @@ function applyBaseTexture(mat: THREE.MeshStandardMaterial) {
   loadAnyTexture(
     props.baseColorUrl as string,
     (tex) => {
-      // Configure color space + addressing
       if (isDDS(props.baseColorUrl)) {
         ;(tex as any).colorSpace = THREE.NoColorSpace
       } else {
@@ -274,7 +264,6 @@ function applyBaseTexture(mat: THREE.MeshStandardMaterial) {
       }
       ;(tex as any).wrapS = (tex as any).wrapT = THREE.RepeatWrapping
       ;(tex as any).flipY = true
-      // Swap in loaded texture
       if (baseTex && baseTex !== tex) {
         try { (baseTex as any).dispose?.() } catch {}
       }
@@ -292,7 +281,6 @@ function applyBaseTexture(mat: THREE.MeshStandardMaterial) {
 
 function buildMetalOverlay(geom: THREE.BufferGeometry) {
   disposeMetal()
-
   if (!scene) return
   if (!props.showMetal) return
   if (!props.metalU8 || !props.metalW || !props.metalL) return
@@ -302,27 +290,25 @@ function buildMetalOverlay(geom: THREE.BufferGeometry) {
   const ml = props.metalL!
   const pxCount = mw * ml
   if (metalU8.length < pxCount) {
-    console.warn('ThreeViewport: metalU8 size does not match expected resolution', {
+    console.warn('OrthoViewport: metalU8 size does not match expected resolution', {
       have: metalU8.length,
       expected: pxCount,
     })
     return
   }
 
-  // Build RGBA texture: red with alpha from metal density (0..255)
   const data = new Uint8Array(pxCount * 4)
   for (let i = 0; i < pxCount; i++) {
-    const a = metalU8[i] ?? 0 // already 0..255
+    const a = metalU8[i] ?? 0
     const j = i * 4
-    data[j + 0] = 255 // R
+    data[j + 0] = 0   // R (blue overlay to distinguish)
     data[j + 1] = 0   // G
-    data[j + 2] = 0   // B
-    data[j + 3] = a   // A
+    data[j + 2] = 255 // B
+    data[j + 3] = a
   }
 
   metalTex = new THREE.DataTexture(data, mw, ml, THREE.RGBAFormat, THREE.UnsignedByteType)
   metalTex.colorSpace = THREE.NoColorSpace
-  // Align metal overlay with terrain: flip Y
   metalTex.center.set(0.5, 0.5)
   metalTex.flipY = true
   metalTex.generateMipmaps = false
@@ -356,29 +342,25 @@ function buildImageOverlays(geom: THREE.BufferGeometry) {
     if (!ov.url) continue
 
     const dds = isDDS(ov.url)
-    // Start with placeholder; replace when the real texture is loaded
     const placeholder = createPlaceholderTexture(2)
 
     const mat = new THREE.MeshBasicMaterial({
       map: placeholder as any,
-      transparent: !dds, // DDS overlays often have no alpha; disable transparency
+      transparent: !dds,
       opacity: Math.max(0, Math.min(1, ov.opacity ?? 1)),
       depthWrite: false,
       polygonOffset: true,
       polygonOffsetFactor: -1,
       polygonOffsetUnits: -1,
-      // For more realistic blending with base texture, try:
-      // blending: THREE.MultiplyBlending,
     })
 
-    // Kick off async load and swap in when ready
     loadAnyTexture(
       ov.url,
       (loaded) => {
         ;(loaded as any).colorSpace = dds ? THREE.NoColorSpace : THREE.SRGBColorSpace
         ;(loaded as any).wrapS = THREE.ClampToEdgeWrapping
         ;(loaded as any).wrapT = THREE.ClampToEdgeWrapping
-        ;(loaded as any).flipY = true // match terrain orientation (same as metal/terrain)
+        ;(loaded as any).flipY = true
         mat.map = loaded as any
         mat.needsUpdate = true
         try { placeholder.dispose() } catch {}
@@ -390,21 +372,18 @@ function buildImageOverlays(geom: THREE.BufferGeometry) {
       /\.tga$/i.test(ov.name)
     )
 
-    const mesh = new THREE.Mesh(geom, mat)
-    mesh.renderOrder = order++
-    scene.add(mesh)
-    imgLayers.push({ mesh, mat, tex: placeholder as any, name: ov.name })
+    const m = new THREE.Mesh(geom, mat)
+    m.renderOrder = order++
+    scene.add(m)
+    imgLayers.push({ mesh: m, mat, tex: placeholder as any, name: ov.name })
   }
 }
 
 function buildMesh() {
   if (!scene) return
-  // Dispose previous
   if (mesh) {
-    // Note: overlays share geometry; dispose them first to avoid double-dispose issues.
     disposeMetal()
     disposeImgLayers()
-
     mesh.geometry.dispose()
     ;(mesh.material as THREE.Material).dispose()
     scene.remove(mesh)
@@ -419,16 +398,14 @@ function buildMesh() {
   const segX = Math.max(1, gridW - 1)
   const segZ = Math.max(1, gridL - 1)
 
-  // Plane is initially in XY, rotate to XZ so Y is up
   const geom = new THREE.PlaneGeometry(widthWorld, lengthWorld, segX, segZ)
   geom.rotateX(-Math.PI / 2)
 
-  // Fill Y from heights
   const pos = geom.getAttribute('position') as THREE.BufferAttribute
   const vertexCount = (segX + 1) * (segZ + 1)
   if (vertexCount !== heights.length) {
     console.warn(
-      `ThreeViewport: vertexCount ${vertexCount} != heights.length ${heights.length} (gridW=${gridW}, gridL=${gridL})`
+      `OrthoViewport: vertexCount ${vertexCount} != heights.length ${heights.length} (gridW=${gridW}, gridL=${gridL})`
     )
   }
   for (let z = 0; z < gridL; z++) {
@@ -442,7 +419,7 @@ function buildMesh() {
   geom.computeVertexNormals()
 
   const mat = new THREE.MeshStandardMaterial({
-    color: 0x8899aa,
+    color: 0x99aabb,
     metalness: 0.0,
     roughness: 1.0,
     side: THREE.DoubleSide,
@@ -450,23 +427,41 @@ function buildMesh() {
     wireframe: !!props.wireframe,
   })
 
-  // Apply base color texture if provided
   applyBaseTexture(mat)
 
   mesh = new THREE.Mesh(geom, mat)
   scene.add(mesh)
 
-  // Metal overlay sharing this geometry
   buildMetalOverlay(geom)
-
-  // Image overlays sharing this geometry
   buildImageOverlays(geom)
 
-  // Grid helper for orientation
   const size = Math.max(widthWorld, lengthWorld)
   grid = new THREE.GridHelper(size, 20, 0x222222, 0x444444)
   grid.visible = props.showGrid ?? true
   scene.add(grid)
+}
+
+function fitOrthographicFrustum(w: number, h: number) {
+  if (!camera) return
+  const aspect = Math.max(1e-6, w / h)
+  const worldAspect = Math.max(1e-6, props.widthWorld / Math.max(1e-6, props.lengthWorld))
+
+  let halfW: number
+  let halfH: number
+  if (aspect >= worldAspect) {
+    // window wider than world: height limits
+    halfH = props.lengthWorld / 2
+    halfW = halfH * aspect
+  } else {
+    // window taller than world: width limits
+    halfW = props.widthWorld / 2
+    halfH = halfW / aspect
+  }
+  camera.left = -halfW
+  camera.right = halfW
+  camera.top = halfH
+  camera.bottom = -halfH
+  camera.updateProjectionMatrix()
 }
 
 function init() {
@@ -477,8 +472,24 @@ function init() {
   scene = new THREE.Scene()
   scene.background = new THREE.Color(0x0e0e10)
 
-  camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 100000)
-  camera.position.set(props.widthWorld * 0.4, Math.max(props.widthWorld, props.lengthWorld) * 0.6, props.lengthWorld * 0.6)
+  camera = new THREE.OrthographicCamera(-w / 2, w / 2, h / 2, -h / 2, 0.1, 100000)
+  const cx = props.widthWorld * 0.5
+  const cz = props.lengthWorld * 0.5
+  camera.position.set(cx, Math.max(props.widthWorld, props.lengthWorld), cz)
+  camera.up.set(0, 0, 1)
+  camera.lookAt(new THREE.Vector3(cx, 0, cz))
+  {
+    const qRaw = props.screenRotationQuarter ?? 0
+    const q = ((qRaw % 4) + 4) % 4
+    const ups = [
+      new THREE.Vector3(0, 0, 1),
+      new THREE.Vector3(1, 0, 0),
+      new THREE.Vector3(0, 0, -1),
+      new THREE.Vector3(-1, 0, 0),
+    ]
+    camera.up.copy(ups[q])
+    camera.lookAt(new THREE.Vector3(cx, 0, cz))
+  }
 
   renderer = new THREE.WebGLRenderer({ antialias: true })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
@@ -487,26 +498,35 @@ function init() {
 
   controls = new OrbitControls(camera, renderer.domElement)
   controls.enableDamping = true
-  controls.target.set(props.widthWorld * 0.5 - props.widthWorld * 0.5, 0, props.lengthWorld * 0.5 - props.lengthWorld * 0.5)
+  ;(controls as any).enableRotate = false
+  ;(controls as any).screenSpacePanning = true
+  controls.target.set(cx, 0, cz)
+  // friendlier orthographic controls
+  ;(controls as any).mouseButtons = {
+    LEFT: THREE.MOUSE.PAN,
+    MIDDLE: THREE.MOUSE.DOLLY,
+    RIGHT: THREE.MOUSE.PAN,
+  }
+  ;(controls as any).touches = {
+    ONE: THREE.TOUCH.PAN,
+    TWO: THREE.TOUCH.DOLLY_PAN,
+  }
 
-  // Lights
   ambientLight = new THREE.AmbientLight(0xffffff, 0.6)
   scene.add(ambientLight)
   dirLight = new THREE.DirectionalLight(0xffffff, 0.8)
   dirLight.position.set(1, 1, 1).multiplyScalar(1000)
   scene.add(dirLight)
 
-  // Apply environment if provided
   applyEnvSettings()
-
   buildMesh()
+  fitOrthographicFrustum(w, h)
 
   const onResize = () => {
     if (!renderer || !camera || !container.value) return
     const w = container.value.clientWidth || 800
     const h = container.value.clientHeight || 600
-    camera.aspect = w / h
-    camera.updateProjectionMatrix()
+    fitOrthographicFrustum(w, h)
     renderer.setSize(w, h)
   }
   window.addEventListener('resize', onResize)
@@ -516,7 +536,6 @@ function init() {
     if (controls) controls.update()
     renderer?.render(scene!, camera!)
 
-    // Emit FPS roughly once per second
     framesSince++
     const now = performance.now()
     if (now - lastFpsTs >= 1000) {
@@ -547,7 +566,6 @@ onBeforeUnmount(() => {
   disposeImgLayers()
   disposeBaseTex()
 
-  // Remove lights
   if (scene && ambientLight) {
     scene.remove(ambientLight)
     ambientLight = null
@@ -620,7 +638,7 @@ watch(
   }
 )
 
- // Update grid visibility
+// Update grid visibility
 watch(
   () => props.showGrid,
   () => {
@@ -637,7 +655,25 @@ watch(
   { deep: true }
 )
 
-// Expose a method to request fullscreen for this viewport
+watch(
+  () => props.screenRotationQuarter,
+  () => {
+    if (!camera) return
+    const qRaw = props.screenRotationQuarter ?? 0
+    const q = ((qRaw % 4) + 4) % 4
+    const cx = props.widthWorld * 0.5
+    const cz = props.lengthWorld * 0.5
+    const ups = [
+      new THREE.Vector3(0, 0, 1),
+      new THREE.Vector3(1, 0, 0),
+      new THREE.Vector3(0, 0, -1),
+      new THREE.Vector3(-1, 0, 0),
+    ]
+    camera.up.copy(ups[q])
+    camera.lookAt(new THREE.Vector3(cx, 0, cz))
+  }
+)
+
 defineExpose({
   requestFullscreen: () => {
     const el = container.value as any
@@ -653,7 +689,6 @@ defineExpose({
 <style scoped>
 .viewport {
   width: 100%;
-  /* Height is set via inline style based on fullscreen state */
   min-height: 400px;
   outline: 1px solid #222;
   box-sizing: border-box;

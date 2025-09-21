@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
-import ThreeViewport from './components/ThreeViewport.vue'
+import ViewportHost from './components/editor/ViewportHost.vue'
+import { createResourceBus } from './lib/editor/resource-bus'
+import { viewportManager } from './lib/editor/viewport-manager'
+import { perspectiveViewportPlugin } from './plugins/viewport/perspective'
+import { orthographicViewportPlugin } from './plugins/viewport/orthographic'
 import { parseSMF, computeWorldSize, chooseStride, downsampleHeightField, u16ToFloatHeights, type SMFParsed } from './lib/smf'
 import { resolveMapPackageFromZip } from './lib/archive'
 import { parseMapinfoLua } from './lib/mapinfo'
@@ -9,7 +13,7 @@ import Toolbar from './components/app/Toolbar.vue'
 import StatusBar from './components/app/StatusBar.vue'
 import PerfDrawer from './components/app/PerfDrawer.vue'
 import FilesExplorer from './components/panels/FilesExplorer.vue'
-import { filesState } from './state/files.ts'
+import { filesState } from './state/files'
 
 const smf = ref<SMFParsed | null>(null)
 const errorMsg = ref<string | null>(null)
@@ -28,6 +32,11 @@ const showGrid = ref(true)
 const fps = ref<number | null>(null)
 const fpsHovering = ref(false)
 const fpsPinned = ref(false)
+
+// Plugin system: ResourceBus + register viewports
+const bus = createResourceBus()
+if (!viewportManager.get('perspective')) viewportManager.register(perspectiveViewportPlugin)
+if (!viewportManager.get('orthographic')) viewportManager.register(orthographicViewportPlugin)
 
 /* Panel visibility */
 const showLeftPanel = ref(true)
@@ -279,8 +288,6 @@ async function loadSmfFromEntry(e: UploadedEntry) {
   await loadSMFFromFile(e.file)
 }
 
-// Child ref for fullscreen API (still available if needed)
-const viewportRef = ref<InstanceType<typeof ThreeViewport> | null>(null)
 
 const header = computed(() => smf.value?.header)
 const mapinfoJSON = ref<any | null>(null)
@@ -305,6 +312,42 @@ const envFromMapinfo = computed(() => {
 
   return env
 })
+
+// ResourceBus: publish reactive state to plugins
+watch([widthWorld, lengthWorld, gridW, gridL, heights], () => {
+  if (heights.value) {
+    bus.set('terrain', {
+      widthWorld: widthWorld.value,
+      lengthWorld: lengthWorld.value,
+      gridW: gridW.value,
+      gridL: gridL.value,
+      heights: heights.value,
+    })
+  }
+}, { immediate: true })
+
+watch([showMetal, smf], () => {
+  const m = smf.value
+  bus.set('metal', {
+    showMetal: !!showMetal.value,
+    metalU8: m?.metalU8,
+    metalW: m?.metalWidth,
+    metalL: m?.metalLength,
+  } as any)
+}, { immediate: true })
+
+watch([baseColorUrl, baseColorIsDDS], () => {
+  bus.set('baseTexture', { url: baseColorUrl.value ?? null, isDDS: !!baseColorIsDDS.value })
+}, { immediate: true })
+
+watch([wireframe, showGrid], () => {
+  bus.set('display', { wireframe: !!wireframe.value, showGrid: !!showGrid.value })
+}, { immediate: true })
+
+
+watch(envFromMapinfo, (v) => {
+  bus.set('env', v || undefined)
+}, { immediate: true, deep: true })
 
 const autoResolveAfterSmf = ref(false)
 const dirPickerSupported = ref<boolean>(typeof (window as any) !== 'undefined' && !!(window as any).showDirectoryPicker)
@@ -404,6 +447,10 @@ const overlaysToRender = computed(() => {
   const urls = new Set(Object.values(resourceSelections.value).filter(Boolean))
   return overlays.value.filter(o => urls.has(o.url))
 })
+
+watch(overlaysToRender, (v) => {
+  bus.set('overlays', Array.isArray(v) ? v : [])
+}, { immediate: true, deep: true })
 
 // SMT discovery from uploaded content and mapinfo references
 const smtFilesFound = computed(() =>
@@ -1074,26 +1121,10 @@ export default defineComponent({
         <p>Select an .smf file to visualize the heightmap.</p>
         <p>You can also load a map folder (MAP_EXAMPLES_NOCOMMIT) to pick textures and overlays.</p>
       </div>
-      <ThreeViewport
-        v-else
-        ref="viewportRef"
-        :widthWorld="widthWorld"
-        :lengthWorld="lengthWorld"
-        :gridW="gridW"
-        :gridL="gridL"
-        :heights="heights"
-        :showMetal="showMetal"
-        :metalU8="smf?.metalU8"
-        :metalW="smf?.metalWidth"
-        :metalL="smf?.metalLength"
-        :baseColorUrl="baseColorUrl"
-        :baseColorIsDDS="baseColorIsDDS"
-        :wireframe="wireframe"
-        :showGrid="showGrid"
-        :overlays="overlaysToRender"
-        :env="envFromMapinfo"
-        @fps="fps = $event"
-      />
+      <div v-else class="viewport-grid">
+        <ViewportHost pluginId="perspective" :bus="bus" buttonLabel="Toggle Grid" />
+        <ViewportHost pluginId="orthographic" :bus="bus" buttonLabel="Rotate 90°" />
+      </div>
     </div>
 
     <div v-if="showRightPanel" class="divider divider-right" @mousedown="(e) => startDrag('right', e)"></div>
@@ -1578,5 +1609,14 @@ button.small {
 }
 .divider-right {
   border-left: 1px solid #222;
+}
+.viewport-grid {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 6px;
+  box-sizing: border-box;
 }
 </style>
