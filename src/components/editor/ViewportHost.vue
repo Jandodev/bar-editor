@@ -47,6 +47,13 @@ function onAtlasToggle() {
   const next = view === 'atlas' ? 'terrain' : 'atlas'
   props.bus.set('ortho', { ...ortho, view: next })
 }
+function onProfilerToggle() {
+  if (props.pluginId !== 'orthographic') return
+  const ortho = (props.bus.get('ortho') as any) || {}
+  const view = String(ortho.view || 'terrain')
+  const next = view === 'profiler' ? 'terrain' : 'profiler'
+  props.bus.set('ortho', { ...ortho, view: next })
+}
 </script>
 
 <template>
@@ -55,6 +62,7 @@ function onAtlasToggle() {
       <div class="btn-row">
         <button class="overlay-btn" @click="onTopButtonClick">{{ buttonLabel ?? (pluginId === 'orthographic' ? 'Rotate 90°' : 'Toggle Grid') }}</button>
         <button v-if="pluginId === 'orthographic'" class="overlay-btn" @click="onAtlasToggle">Toggle Atlas</button>
+        <button v-if="pluginId === 'orthographic'" class="overlay-btn" @click="onProfilerToggle">Profiler</button>
       </div>
     </div>
     <div class="mount" ref="mountEl"></div>

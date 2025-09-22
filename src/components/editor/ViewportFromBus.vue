@@ -33,9 +33,20 @@ const state = reactive({
   screenRotationQuarter: 0,
   images: [] as any[],
   atlasMode: false,
+  profilerMode: false,
+
+  // Editing config (shared via bus 'edit')
+  editEnabled: false,
+  editMode: 'add' as 'add' | 'remove' | 'smooth',
+  editRadius: 64,
+  editStrength: 2,
+  editPreview: true,
 })
 
 let unsubs: Array<() => void> = []
+// Debounce publishing terrain updates to the bus to avoid flooding during strokes
+let terrainUpdateTimer: number | null = null
+let pendingHeights: Float32Array | null = null
 
 onMounted(() => {
   const { bus } = props
@@ -79,6 +90,16 @@ onMounted(() => {
     state.screenRotationQuarter = Number((((q as number) % 4) + 4) % 4)
     const view = v && typeof v.view === 'string' ? String(v.view) : 'terrain'
     state.atlasMode = view === 'atlas'
+    state.profilerMode = view === 'profiler'
+  }
+  const updateEdit = (v: any) => {
+    v = v || {}
+    state.editEnabled = !!v.enabled
+    const m = String(v.mode || state.editMode)
+    state.editMode = (m === 'remove' || m === 'smooth') ? (m as any) : 'add'
+    const r = Number(v.radius); state.editRadius = Number.isFinite(r) ? r : state.editRadius
+    const s = Number(v.strength); state.editStrength = Number.isFinite(s) ? s : state.editStrength
+    state.editPreview = !!v.preview
   }
 
   // initial snapshot
@@ -90,6 +111,7 @@ onMounted(() => {
   updateEnv(bus.get('env'))
   updateImages(bus.get('images'))
   updateOrtho(bus.get('ortho'))
+  updateEdit(bus.get('edit'))
 
   // subscribe to updates
   unsubs = [
@@ -101,6 +123,7 @@ onMounted(() => {
     bus.subscribe('env', updateEnv as any),
     bus.subscribe('images', updateImages as any),
     bus.subscribe('ortho', updateOrtho as any),
+    bus.subscribe('edit', updateEdit as any),
   ]
 })
 
@@ -110,6 +133,41 @@ onBeforeUnmount(() => {
   }
   unsubs = []
 })
+function onEditHeights(newHeights: Float32Array) {
+  // Update local state so UI reacts immediately
+  state.heights = newHeights
+
+  // Debounce write-back to bus to reduce churn while painting
+  pendingHeights = newHeights
+  if (terrainUpdateTimer == null) {
+    terrainUpdateTimer = window.setTimeout(() => {
+      try {
+        const heightsToSend = pendingHeights
+        pendingHeights = null
+        if (heightsToSend) {
+          const terrain = {
+            widthWorld: state.widthWorld,
+            lengthWorld: state.lengthWorld,
+            gridW: state.gridW,
+            gridL: state.gridL,
+            heights: heightsToSend,
+          }
+          ;(props.bus as any).set('terrain', terrain)
+        }
+      } finally {
+        terrainUpdateTimer = null
+      }
+    }, 32) as unknown as number // ~30Hz publish max
+  }
+}
+
+function onFps(newFps: number) {
+  try {
+    const prev = (props.bus.get('perf') as any) || {}
+    const payload = { ...prev, [props.mode]: Number(newFps) || 0, ts: performance.now() }
+    ;(props.bus as any).set('perf', payload)
+  } catch {}
+}
 </script>
 
 <template>
@@ -131,6 +189,13 @@ onBeforeUnmount(() => {
     :showGrid="state.showGrid"
     :overlays="state.overlays"
     :env="state.env"
-    v-bind="mode === 'orthographic' ? { screenRotationQuarter: state.screenRotationQuarter, atlasMode: state.atlasMode, atlasImages: state.images } : {}"
+    v-bind="mode === 'orthographic' ? { screenRotationQuarter: state.screenRotationQuarter, atlasMode: state.atlasMode, atlasImages: state.images, profilerMode: state.profilerMode } : {}"
+    :editEnabled="state.editEnabled"
+    :editMode="state.editMode"
+    :editRadius="state.editRadius"
+    :editStrength="state.editStrength"
+    :editPreview="state.editPreview"
+    @editHeights="onEditHeights"
+    @fps="onFps"
   />
 </template>

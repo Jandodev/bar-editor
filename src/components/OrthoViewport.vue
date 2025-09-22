@@ -4,6 +4,7 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls'
 import { DDSLoader } from 'three/examples/jsm/loaders/DDSLoader'
 import { TGALoader } from 'three/examples/jsm/loaders/TGALoader'
+import { applyAddRemove, applySmooth } from '../lib/terrain-edit'
 
 type OverlayImage = {
   name: string
@@ -49,10 +50,18 @@ type Props = {
   screenRotationQuarter?: number
   atlasMode?: boolean
   atlasImages?: { name: string; url: string; isDDS?: boolean }[]
+
+  // Editing
+  editEnabled?: boolean
+  editMode?: 'add' | 'remove' | 'smooth'
+  editRadius?: number
+  editStrength?: number
+  editPreview?: boolean
+  profilerMode?: boolean
 }
 
 const props = defineProps<Props>()
-const emit = defineEmits<{ (e: 'fps', fps: number): void }>()
+const emit = defineEmits<{ (e: 'fps', fps: number): void; (e: 'editHeights', h: Float32Array): void }>()
 
 const container = ref<HTMLDivElement | null>(null)
 let renderer: THREE.WebGLRenderer | null = null
@@ -62,7 +71,195 @@ let controls: OrbitControls | null = null
 let mesh: THREE.Mesh | null = null
 let grid: THREE.GridHelper | null = null
 
-// Lights
+// Editing helpers
+const raycaster = new THREE.Raycaster()
+const mouseNDC = new THREE.Vector2()
+let isPainting = false
+let lastPaintTs = 0
+
+// Brush preview/debug
+let brushCircle: THREE.Mesh | null = null
+let hitDot: THREE.Mesh | null = null
+let lastHitY = 0
+
+// Profiler metrics (lightweight, toggled by props.profilerMode)
+const profilerModeComputed = computed(() => !!props.profilerMode)
+const profFrameMs = ref(0)
+const profFps = ref(0)
+const profControlsMs = ref(0)
+const profRenderMs = ref(0)
+const profGeomUpdateMs = ref(0)
+const profNormalsMs = ref(0)
+const profBrushMs = ref(0)
+const profRaycastMs = ref(0)
+let lastAnimTs = performance.now()
+let normalsTimer: number | null = null
+let needsNormals = false
+let pixelRatioSaved: number | null = null
+
+// Dirty region tracking for partial vertex updates during painting
+let dirtyMinX = -1, dirtyMaxX = -1, dirtyMinZ = -1, dirtyMaxZ = -1
+function setDirtyBoundsFromBrush(x: number, z: number, radius: number) {
+  const gw = Math.max(2, props.gridW)
+  const gl = Math.max(2, props.gridL)
+  const halfW = props.widthWorld * 0.5
+  const halfL = props.lengthWorld * 0.5
+  const stepX = props.widthWorld / (gw - 1)
+  const stepZ = props.lengthWorld / (gl - 1)
+  const r = Math.max(1e-6, radius)
+  const minX = Math.max(0, Math.floor((x - r + halfW) / stepX))
+  const maxX = Math.min(gw - 1, Math.ceil((x + r + halfW) / stepX))
+  const minZ = Math.max(0, Math.floor((z - r + halfL) / stepZ))
+  const maxZ = Math.min(gl - 1, Math.ceil((z + r + halfL) / stepZ))
+  dirtyMinX = minX; dirtyMaxX = maxX; dirtyMinZ = minZ; dirtyMaxZ = maxZ
+}
+
+function createBrushPreviewIfNeeded() {
+  if (!scene) return
+  if (!brushCircle) {
+    const geo = new THREE.CircleGeometry(1, 64)
+    geo.rotateX(-Math.PI / 2)
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x33aaff,
+      transparent: true,
+      opacity: 0.2,
+      depthWrite: false,
+      depthTest: false,
+    })
+    brushCircle = new THREE.Mesh(geo, mat)
+    brushCircle.renderOrder = 10
+    brushCircle.visible = false
+    scene.add(brushCircle)
+  }
+  if (!hitDot) {
+    const geo = new THREE.SphereGeometry(0.5, 12, 12)
+    const mat = new THREE.MeshBasicMaterial({ color: 0xff3333, depthWrite: false, depthTest: false })
+    hitDot = new THREE.Mesh(geo, mat)
+    hitDot.renderOrder = 10
+    hitDot.visible = false
+    scene.add(hitDot)
+  }
+}
+
+function setBrushPreviewVisible(v: boolean) {
+  if (brushCircle) brushCircle.visible = v
+  if (hitDot) hitDot.visible = v
+}
+
+function updateBrushPreview(x: number, y: number, z: number) {
+  createBrushPreviewIfNeeded()
+  lastHitY = y
+  const r = Number(props.editRadius ?? 64)
+  if (brushCircle) {
+    brushCircle.position.set(x, y + 0.02, z)
+    brushCircle.scale.set(r, r, 1)
+    brushCircle.visible = !!props.editEnabled && !!props.editPreview
+  }
+  if (hitDot) {
+    const s = Math.max(0.5, Math.min(5, r * 0.05))
+    hitDot.scale.set(s, s, s)
+    hitDot.position.set(x, y + 0.03, z)
+    hitDot.visible = !!props.editEnabled && !!props.editPreview
+  }
+}
+
+function screenToNDC(ev: PointerEvent, target: HTMLElement): THREE.Vector2 {
+  const rect = target.getBoundingClientRect()
+  mouseNDC.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1
+  mouseNDC.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1
+  return mouseNDC
+}
+
+function getBrushCenter(ev: PointerEvent): { x: number; y: number; z: number } | null {
+  if (!renderer || !camera || !mesh) return null
+  const ndc = screenToNDC(ev, renderer.domElement)
+  raycaster.setFromCamera(ndc as any, camera as any)
+  const t0 = performance.now()
+  const hits = raycaster.intersectObject(mesh, false)
+  profRaycastMs.value = performance.now() - t0
+  if (!hits.length) return null
+  const p = hits[0].point
+  return { x: p.x, y: p.y, z: p.z }
+}
+
+function applyBrushAt(x: number, z: number) {
+  if (!props.heights) return
+  const mode = (props.editMode ?? 'add')
+  const radius = Number(props.editRadius ?? 64)
+  const strength = Number(props.editStrength ?? 2)
+  let next: Float32Array | null = null
+  const tBrush0 = performance.now()
+  if (mode === 'smooth') {
+    next = applySmooth(
+      props.heights,
+      props.gridW, props.gridL,
+      props.widthWorld, props.lengthWorld,
+      x, z,
+      radius,
+      Math.max(0, Math.min(1, strength))
+    )
+  } else {
+    const delta = mode === 'remove' ? -Math.abs(strength) : Math.abs(strength)
+    next = applyAddRemove(
+      props.heights,
+      props.gridW, props.gridL,
+      props.widthWorld, props.lengthWorld,
+      x, z,
+      radius,
+      delta
+    )
+  }
+  profBrushMs.value = performance.now() - tBrush0
+  if (next) emit('editHeights', next)
+}
+
+function onPointerDown(ev: PointerEvent) {
+  if (!props.editEnabled) return
+  if (ev.button !== 0) return
+  const c = getBrushCenter(ev)
+  if (!c) return
+  isPainting = true
+  lastPaintTs = 0
+  if (controls) (controls as any).enabled = false
+  if (renderer) { try { pixelRatioSaved = renderer.getPixelRatio(); renderer.setPixelRatio(1) } catch {} }
+  ev.preventDefault(); ev.stopPropagation()
+  updateBrushPreview(c.x, c.y, c.z)
+  { const r = Number(props.editRadius ?? 64); setDirtyBoundsFromBrush(c.x, c.z, r) }
+  applyBrushAt(c.x, c.z)
+}
+
+function onPointerMove(ev: PointerEvent) {
+  if (!renderer) return
+  const c = getBrushCenter(ev)
+  if (c && props.editEnabled && props.editPreview) {
+    updateBrushPreview(c.x, c.y, c.z)
+  }
+  if (!isPainting) return
+  if (!c) return
+  const now = performance.now()
+  if (now - lastPaintTs < 16) return
+  lastPaintTs = now
+  ev.preventDefault(); ev.stopPropagation()
+  { const r = Number(props.editRadius ?? 64); setDirtyBoundsFromBrush(c.x, c.z, r) }
+  applyBrushAt(c.x, c.z)
+}
+
+function onPointerUp() {
+  isPainting = false
+  if (controls) (controls as any).enabled = true
+  if (renderer && pixelRatioSaved != null) {
+    try { renderer.setPixelRatio(pixelRatioSaved) } catch {}
+    pixelRatioSaved = null
+  }
+  if (mesh && needsNormals) {
+    try { (mesh.geometry as THREE.BufferGeometry).computeVertexNormals() } catch {}
+    needsNormals = false
+  }
+  // Clear dirty region after completing a stroke
+  dirtyMinX = dirtyMaxX = dirtyMinZ = dirtyMaxZ = -1
+}
+
+ // Lights
 let ambientLight: THREE.AmbientLight | null = null
 let dirLight: THREE.DirectionalLight | null = null
 
@@ -665,6 +862,12 @@ function init() {
   renderer.setSize(w, h)
   container.value.appendChild(renderer.domElement)
 
+  // Editing listeners (non-passive so we can preventDefault to stop controls)
+  renderer.domElement.addEventListener('pointerdown', onPointerDown, { passive: false })
+  renderer.domElement.addEventListener('pointermove', onPointerMove, { passive: false })
+  renderer.domElement.addEventListener('pointerup', onPointerUp, { passive: false })
+  renderer.domElement.addEventListener('pointerleave', onPointerUp, { passive: false })
+
   controls = new OrbitControls(camera, renderer.domElement)
   controls.enableDamping = true
   ;(controls as any).enableRotate = false
@@ -688,6 +891,11 @@ function init() {
   scene.add(dirLight)
 
   applyEnvSettings()
+
+  // Initial preview visibility
+  createBrushPreviewIfNeeded()
+  setBrushPreviewVisible(!!props.editEnabled && !!props.editPreview)
+
   buildMesh()
   fitOrthographicFrustum(w, h)
 
@@ -702,8 +910,23 @@ function init() {
 
   const animate = () => {
     animationId = requestAnimationFrame(animate)
-    if (controls) controls.update()
+    const frameStart = performance.now()
+    const c0 = frameStart
+    if (controls) {
+      const cs = performance.now()
+      controls.update()
+      profControlsMs.value = performance.now() - cs
+    }
+    const r0 = performance.now()
     renderer?.render(scene!, camera!)
+    profRenderMs.value = performance.now() - r0
+    const now2 = performance.now()
+    profFrameMs.value = now2 - frameStart
+    const dt = now2 - lastAnimTs
+    if (dt > 0) {
+      profFps.value = Math.round(1000 / dt)
+    }
+    lastAnimTs = now2
 
     framesSince++
     const now = performance.now()
@@ -727,6 +950,14 @@ onBeforeUnmount(() => {
   cancelAnimationFrame(animationId)
   window.removeEventListener('resize', () => {})
   document.removeEventListener('fullscreenchange', onFullscreenChange)
+  try { renderer?.domElement?.removeEventListener('pointerdown', onPointerDown) } catch {}
+  try { renderer?.domElement?.removeEventListener('pointermove', onPointerMove) } catch {}
+  try { renderer?.domElement?.removeEventListener('pointerup', onPointerUp) } catch {}
+  try { renderer?.domElement?.removeEventListener('pointerleave', onPointerUp) } catch {}
+
+  // Dispose brush preview
+  if (scene && brushCircle) { scene.remove(brushCircle); (brushCircle.geometry as any)?.dispose?.(); (brushCircle.material as any)?.dispose?.(); brushCircle = null }
+  if (scene && hitDot) { scene.remove(hitDot); (hitDot.geometry as any)?.dispose?.(); (hitDot.material as any)?.dispose?.(); hitDot = null }
   if (controls) {
     controls.dispose()
     controls = null
@@ -759,10 +990,59 @@ onBeforeUnmount(() => {
   camera = null
 })
 
-// Rebuild base mesh when heights or grid sizes change
+/* Rebuild on dimension changes; fast-update on heights to avoid full geometry rebuild per stroke */
 watch(
   () => [props.gridW, props.gridL, props.widthWorld, props.lengthWorld, props.heights],
-  () => buildMesh(),
+  () => {
+    if (!mesh) { buildMesh(); return }
+    const geom = (mesh.geometry as THREE.BufferGeometry)
+    const pos = geom.getAttribute('position') as THREE.BufferAttribute
+    const segX = Math.max(1, props.gridW - 1)
+    const segZ = Math.max(1, props.gridL - 1)
+    const expectedVerts = (segX + 1) * (segZ + 1)
+    if (!props.heights || props.heights.length !== expectedVerts) {
+      buildMesh()
+      return
+    }
+    // Fast path: update Y only (partial update when painting)
+    const g0 = performance.now()
+    if (isPainting && dirtyMinX >= 0 && dirtyMinZ >= 0) {
+      const minZ = Math.max(0, dirtyMinZ)
+      const maxZ = Math.min(props.gridL - 1, dirtyMaxZ)
+      const minX = Math.max(0, dirtyMinX)
+      const maxX = Math.min(props.gridW - 1, dirtyMaxX)
+      for (let z = minZ; z <= maxZ; z++) {
+        for (let x = minX; x <= maxX; x++) {
+          const idx = z * props.gridW + x
+          const v = z * (segX + 1) + x
+          pos.setY(v, props.heights[idx] ?? 0)
+        }
+      }
+    } else {
+      for (let z = 0; z < props.gridL; z++) {
+        for (let x = 0; x < props.gridW; x++) {
+          const idx = z * props.gridW + x
+          const v = z * (segX + 1) + x
+          pos.setY(v, props.heights[idx] ?? 0)
+        }
+      }
+    }
+    pos.needsUpdate = true
+    profGeomUpdateMs.value = performance.now() - g0
+    // Defer normals during painting; otherwise throttle recompute
+    if (isPainting) {
+      needsNormals = true
+    } else {
+      if (!normalsTimer) {
+        normalsTimer = window.setTimeout(() => {
+          const n0 = performance.now()
+          try { geom.computeVertexNormals() } catch {}
+          profNormalsMs.value = performance.now() - n0
+          normalsTimer = null
+        }, 32) as unknown as number
+      }
+    }
+  },
   { deep: false }
 )
 
@@ -824,13 +1104,32 @@ watch(
   }
 )
 
-// Update environment when mapinfo-derived settings change
+ // Update environment when mapinfo-derived settings change
 watch(
   () => props.env,
   () => {
     applyEnvSettings()
   },
   { deep: true }
+)
+
+// Preview visibility toggles
+watch(
+  () => [props.editEnabled, props.editPreview],
+  () => {
+    createBrushPreviewIfNeeded()
+    setBrushPreviewVisible(!!props.editEnabled && !!props.editPreview)
+  }
+)
+
+// Preview radius update
+watch(
+  () => props.editRadius,
+  () => {
+    if (!brushCircle) return
+    const r = Number(props.editRadius ?? 64)
+    brushCircle.scale.set(r, r, 1)
+  }
 )
 
 watch(
@@ -861,7 +1160,18 @@ defineExpose({
 </script>
 
 <template>
-  <div class="viewport" :style="viewportStyle" ref="container"></div>
+  <div class="viewport" :style="viewportStyle" ref="container">
+    <div v-if="profilerModeComputed" class="prof-overlay">
+      <div class="prof-row"><b>FPS:</b> <span>{{ profFps }}</span></div>
+      <div class="prof-row"><b>Frame ms:</b> <span>{{ profFrameMs.toFixed(2) }}</span></div>
+      <div class="prof-row"><b>Controls ms:</b> <span>{{ profControlsMs.toFixed(2) }}</span></div>
+      <div class="prof-row"><b>Render ms:</b> <span>{{ profRenderMs.toFixed(2) }}</span></div>
+      <div class="prof-row"><b>Geom update ms:</b> <span>{{ profGeomUpdateMs.toFixed(2) }}</span></div>
+      <div class="prof-row"><b>Normals ms:</b> <span>{{ profNormalsMs.toFixed(2) }}</span></div>
+      <div class="prof-row"><b>Brush ms:</b> <span>{{ profBrushMs.toFixed(2) }}</span></div>
+      <div class="prof-row"><b>Raycast ms:</b> <span>{{ profRaycastMs.toFixed(2) }}</span></div>
+    </div>
+  </div>
 </template>
 
 <style scoped>
@@ -870,5 +1180,24 @@ defineExpose({
   min-height: 400px;
   outline: 1px solid #222;
   box-sizing: border-box;
+}
+.prof-overlay {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  background: rgba(12, 14, 18, 0.85);
+  border: 1px solid #2a2f3a;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #dfe5f2;
+  pointer-events: none;
+  min-width: 160px;
+}
+.prof-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  line-height: 1.35;
 }
 </style>

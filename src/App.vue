@@ -9,7 +9,7 @@ import { parseSMF, computeWorldSize, chooseStride, downsampleHeightField, u16ToF
 import { resolveMapPackageFromZip } from './lib/archive'
 import { parseMapinfoLua } from './lib/mapinfo'
 import { pickDirectoryAndCollectFiles } from './lib/folder'
-import { buildFlatSMFBuffer } from './lib/smf-writer'
+import { buildSMFFromFloatHeights, buildSMFFromFloatHeightsWithStubs, patchSMFHeightsInBuffer } from './lib/smf-writer'
 import { saveBytesDialog, saveTextDialog } from './lib/save'
 import Toolbar from './components/app/Toolbar.vue'
 import StatusBar from './components/app/StatusBar.vue'
@@ -18,6 +18,7 @@ import FilesExplorer from './components/panels/FilesExplorer.vue'
 import { filesState } from './state/files'
 
 const smf = ref<SMFParsed | null>(null)
+const smfBufferOrig = ref<ArrayBuffer | null>(null)
 const errorMsg = ref<string | null>(null)
 
 const widthWorld = ref(0)
@@ -40,6 +41,39 @@ const bus = createResourceBus()
 if (!viewportManager.get('perspective')) viewportManager.register(perspectiveViewportPlugin)
 if (!viewportManager.get('orthographic')) viewportManager.register(orthographicViewportPlugin)
 
+// Subscribe to viewport FPS via ResourceBus 'perf' and keep StatusBar updated
+let unsubPerf: (() => void) | null = null
+try {
+  unsubPerf = bus.subscribe('perf', (p: any) => {
+    try {
+      const vals = [p?.perspective, p?.orthographic]
+        .map((v: any) => Number(v))
+        .filter((v: number) => Number.isFinite(v) && v > 0)
+      fps.value = vals.length ? Math.round(vals.reduce((a: number, b: number) => a + b, 0) / vals.length) : null
+    } catch {}
+  })
+} catch {}
+
+/* Panel visibility */
+
+// Ortho view control (terrain/atlas/profiler) for right panel
+const rightOrthoView = ref<'terrain' | 'atlas' | 'profiler'>('terrain')
+try {
+  const o = bus.get('ortho') as any
+  const v = o?.view
+  if (v === 'atlas' || v === 'profiler' || v === 'terrain') rightOrthoView.value = v
+} catch {}
+watch(rightOrthoView, (v) => {
+  const ortho = (bus.get('ortho') as any) || {}
+  bus.set('ortho', { ...ortho, view: v })
+}, { immediate: true })
+let unsubOrtho: (() => void) | null = null
+try {
+  unsubOrtho = bus.subscribe('ortho', (o: any) => {
+    const v = o?.view
+    if (v === 'atlas' || v === 'profiler' || v === 'terrain') rightOrthoView.value = v
+  })
+} catch {}
 /* Panel visibility */
 const showLeftPanel = ref(true)
 const showRightPanel = ref(true)
@@ -110,6 +144,8 @@ function onDragEnd() {
 onBeforeUnmount(() => {
   window.removeEventListener('mousemove', onDragMove)
   window.removeEventListener('mouseup', onDragEnd)
+  try { unsubPerf?.() } catch {}
+  try { unsubOrtho?.() } catch {}
 })
 
 // Debounced resize events so ThreeViewport reflows while dragging
@@ -160,6 +196,8 @@ const collapseNewFlat = ref(false)
 const collapseMapDefinition = ref(false)
 const collapseMapInfo = ref(false)
 const collapseDisplay = ref(false)
+const collapseOrthoView = ref(false)
+const collapseEditing = ref(false)
 const collapseBaseTexture = ref(false)
 const collapseMapinfoResources = ref(false)
 const collapseMapinfoJson = ref(false)
@@ -175,6 +213,13 @@ const baseColorIsDDS = ref(false)
 type OverlayControl = { name: string; url: string; visible: boolean; opacity: number; isDDS?: boolean }
 const overlays = ref<OverlayControl[]>([])
 
+// Terrain editing config (shared to viewports via ResourceBus 'edit')
+const editEnabled = ref(false)
+const editMode = ref<'add' | 'remove' | 'smooth'>('add')
+const editRadius = ref<number>(64)
+const editStrength = ref<number>(2)
+const editPreview = ref<boolean>(true)
+
 // New flat SMF generation controls
 const newMapW = ref<number>(512)          // squares (X)
 const newMapL = ref<number>(512)          // squares (Z)
@@ -182,18 +227,28 @@ const newMapSquare = ref<number>(8)       // world units per square
 const newMapMin = ref<number>(0)
 const newMapMax = ref<number>(1)
 const newMapFlatU16 = ref<number>(0)      // 0..65535
+const flatCurrentHeight = ref<number | null>(null)
 
 async function generateFlatSMF(saveOnly = true) {
   try {
-    const buf = buildFlatSMFBuffer({
-      width: Math.max(1, Math.floor(newMapW.value || 1)),
-      length: Math.max(1, Math.floor(newMapL.value || 1)),
-      squareSize: Math.max(1, Math.floor(newMapSquare.value || 8)),
+    const width = Math.max(1, Math.floor(newMapW.value || 1))
+    const length = Math.max(1, Math.floor(newMapL.value || 1))
+    const squareSize = Math.max(1, Math.floor(newMapSquare.value || 8))
+    const minH = Number(newMapMin.value)
+    const maxH = Number(newMapMax.value)
+    const hmCount = (width + 1) * (length + 1)
+    const u16 = Math.max(0, Math.min(65535, Math.floor(newMapFlatU16.value || 0)))
+    const hConst = minH + (u16 / 65535) * (maxH - minH)
+    const heightsArr = new Float32Array(hmCount); heightsArr.fill(hConst)
+    const buf = buildSMFFromFloatHeightsWithStubs({
+      width,
+      length,
+      squareSize,
       texelsPerSquare: 8,
       tileSize: 32,
-      minHeight: Number(newMapMin.value),
-      maxHeight: Number(newMapMax.value),
-      flatHeightU16: Math.max(0, Math.min(65535, Math.floor(newMapFlatU16.value || 0))),
+      heights: heightsArr,
+      minHeight: minH,
+      maxHeight: maxH,
     })
     // Offer to save as maps/flat.smf (user can change the folder)
     await saveBytesDialog('flat.smf', buf, 'application/octet-stream')
@@ -205,6 +260,109 @@ async function generateFlatSMF(saveOnly = true) {
     }
   } catch (e) {
     console.warn('Flat SMF generation failed:', e)
+    errorMsg.value = (e as Error).message || String(e)
+  }
+}
+
+async function createFlatFromCurrent(loadOnly = true) {
+  try {
+    if (!smf.value || !smfBufferOrig.value) {
+      errorMsg.value = 'Load an SMF first.'
+      return
+    }
+    const hdr = smf.value.header
+    const fullW = hdr.width + 1
+    const fullL = hdr.length + 1
+    // Default target to header.minHeight if user left empty
+    const target = Number.isFinite(flatCurrentHeight.value as any)
+      ? Number(flatCurrentHeight.value)
+      : hdr.minHeight
+    const flat = new Float32Array(fullW * fullL)
+    flat.fill(target)
+
+    const buf = patchSMFHeightsInBuffer(smfBufferOrig.value, flat)
+
+    if (loadOnly) {
+      const file = new File([new Blob([buf])], 'flat_from_current.smf', { type: 'application/octet-stream' })
+      await loadSMFFromFile(file)
+    } else {
+      await saveBytesDialog('flat_from_current.smf', buf, 'application/octet-stream')
+    }
+  } catch (e) {
+    console.warn('Create flat from current failed:', e)
+    errorMsg.value = (e as Error).message || String(e)
+  }
+}
+
+function upsampleHeightsNearest(down: Float32Array, downW: number, downL: number, fullW: number, fullL: number, stride: number): Float32Array {
+  const s = Math.max(1, Math.floor(stride || 1))
+  const out = new Float32Array(fullW * fullL)
+  for (let z = 0; z < fullL; z++) {
+    const srcZ = Math.min(Math.floor(z / s), downL - 1)
+    for (let x = 0; x < fullW; x++) {
+      const srcX = Math.min(Math.floor(x / s), downW - 1)
+      out[z * fullW + x] = down[srcZ * downW + srcX] ?? 0
+    }
+  }
+  return out
+}
+
+async function saveEditedSMF() {
+  try {
+    const terrain = (bus.get('terrain') as any)
+    if (!terrain || !terrain.heights || !terrain.gridW || !terrain.gridL) {
+      errorMsg.value = 'No editable terrain in memory.'
+      return
+    }
+    const gridWNow = Number(terrain.gridW)
+    const gridLNow = Number(terrain.gridL)
+    const widthSquares = Math.max(1, gridWNow - 1)
+    const lengthSquares = Math.max(1, gridLNow - 1)
+    const squareSize = smf.value?.header.squareSize ?? Math.max(1, Math.round((terrain.widthWorld || (widthWorld.value)) / Math.max(1, widthSquares)))
+
+    // Compute min/max from current floats to avoid clipping on save
+    const h = terrain.heights as Float32Array
+    let minH = Infinity, maxH = -Infinity
+    for (let i = 0; i < h.length; i++) {
+      const v = h[i]
+      if (Number.isFinite(v)) {
+        if (v < minH) minH = v
+        if (v > maxH) maxH = v
+      }
+    }
+    if (!Number.isFinite(minH) || !Number.isFinite(maxH) || maxH <= minH) {
+      minH = 0; maxH = 1
+    }
+
+    let outBuf: ArrayBuffer
+    if (smf.value && smfBufferOrig.value) {
+      // Upsample downsampled editor heights back to full SMF grid and patch in-place
+      const fullW = smf.value.header.width + 1
+      const fullL = smf.value.header.length + 1
+      const downWNow = gridWNow
+      const downLNow = gridLNow
+      // Prefer the stride we used on load; fall back to deriving it
+      const stride = Math.max(1, Number(strideUsed.value || Math.floor(smf.value.header.width / Math.max(1, downWNow - 1))))
+      const fullHeights = upsampleHeightsNearest(h, downWNow, downLNow, fullW, fullL, stride)
+      outBuf = patchSMFHeightsInBuffer(smfBufferOrig.value, fullHeights)
+    } else {
+      // Fallback: write a fresh SMF with stubbed sections
+      outBuf = buildSMFFromFloatHeightsWithStubs({
+        width: widthSquares,
+        length: lengthSquares,
+        squareSize,
+        texelsPerSquare: smf.value?.header.texelsPerSquare ?? 8,
+        tileSize: smf.value?.header.tileSize ?? 32,
+        heights: h,
+        minHeight: minH,
+        maxHeight: maxH,
+        id: smf.value?.header.id ?? undefined,
+      })
+    }
+
+    await saveBytesDialog('edited.smf', outBuf, 'application/octet-stream')
+  } catch (e) {
+    console.warn('Save edited SMF failed:', e)
     errorMsg.value = (e as Error).message || String(e)
   }
 }
@@ -430,7 +588,7 @@ watch(envFromMapinfo, (v) => {
   bus.set('env', v || undefined)
 }, { immediate: true, deep: true })
 
-// Publish available images to the bus for atlas view
+ // Publish available images to the bus for atlas view
 watch(folderImages, (imgs) => {
   const list = Array.isArray(imgs) ? imgs.map((img) => ({
     name: img.name,
@@ -439,6 +597,17 @@ watch(folderImages, (imgs) => {
   })) : []
   bus.set('images', list)
 }, { immediate: true, deep: true })
+
+// Publish editing config to all viewports
+watch([editEnabled, editMode, editRadius, editStrength, editPreview], () => {
+  bus.set('edit', {
+    enabled: !!editEnabled.value,
+    mode: editMode.value,
+    radius: Number(editRadius.value || 0),
+    strength: Number(editStrength.value || 0),
+    preview: !!editPreview.value,
+  })
+}, { immediate: true })
 
 const autoResolveAfterSmf = ref(false)
 const dirPickerSupported = ref<boolean>(typeof (window as any) !== 'undefined' && !!(window as any).showDirectoryPicker)
@@ -688,6 +857,7 @@ async function handleFiles(files: FileList | null) {
   if (!file) return
   try {
     const buf = await file.arrayBuffer()
+    smfBufferOrig.value = buf
     const parsed = parseSMF(buf)
     smf.value = parsed
 
@@ -733,6 +903,7 @@ async function handleFiles(files: FileList | null) {
 const loadSMFFromFile = async (file: File): Promise<void> => {
   try {
     const buf = await file.arrayBuffer()
+    smfBufferOrig.value = buf
     const parsed = parseSMF(buf)
     smf.value = parsed
 
@@ -936,6 +1107,7 @@ async function handlePackage(file: File) {
     }))
 
     // parse SMF
+    smfBufferOrig.value = pkg.smfBuffer
     const parsed = parseSMF(pkg.smfBuffer)
     smf.value = parsed
 
@@ -1241,6 +1413,21 @@ export default defineComponent({
           <div class="status warn" v-if="Number(newMapMax) <= Number(newMapMin)">
             maxHeight should be greater than minHeight (current: {{ newMapMin }}..{{ newMapMax }})
           </div>
+
+          <div style="height:6px;"></div>
+          <div style="border-top:1px solid #2a2a2a; margin:4px 0;"></div>
+
+          <div style="display:flex; flex-direction:column; gap:8px;">
+            <div style="display:grid; grid-template-columns:auto 1fr; gap:6px 10px; align-items:center;">
+              <label>From current SMF: Target height (world units)</label>
+              <input type="number" v-model.number="flatCurrentHeight" step="0.1" :placeholder="header ? String(header.minHeight) : '0'" />
+            </div>
+            <div style="display:flex; gap:8px;">
+              <button class="small" :disabled="!smfBufferOrig" @click="createFlatFromCurrent(true)">Create Flat From Current (load)</button>
+              <button class="small" :disabled="!smfBufferOrig" @click="createFlatFromCurrent(false)">Create & Save Flat From Current</button>
+            </div>
+            <div class="status warn" v-if="!smfBufferOrig">Load an SMF first to enable this.</div>
+          </div>
         </div>
       </div>
 
@@ -1277,6 +1464,20 @@ export default defineComponent({
       </div>
 
       <div class="section">
+        <h3 class="collapsible" @click="collapseOrthoView = !collapseOrthoView"><span class="twisty">{{ collapseOrthoView ? '▶' : '▼' }}</span> Ortho View</h3>
+        <div class="info" v-show="!collapseOrthoView">
+          <div style="display:grid; grid-template-columns:auto 1fr; gap:6px 10px; align-items:center;">
+            <label>Right panel view</label>
+            <select v-model="rightOrthoView">
+              <option value="terrain">Terrain</option>
+              <option value="atlas">Atlas</option>
+              <option value="profiler">Profiler</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
         <h3 class="collapsible" @click="collapseDisplay = !collapseDisplay"><span class="twisty">{{ collapseDisplay ? '▶' : '▼' }}</span> Display</h3>
         <label class="toggle" v-show="!collapseDisplay">
           <input type="checkbox" v-model="showMetal" />
@@ -1290,6 +1491,38 @@ export default defineComponent({
           <input type="checkbox" v-model="showGrid" />
           <span>Grid</span>
         </label>
+      </div>
+
+      <div class="section">
+        <h3 class="collapsible" @click="collapseEditing = !collapseEditing"><span class="twisty">{{ collapseEditing ? '▶' : '▼' }}</span> Terrain Editing (Experimental)</h3>
+        <div class="info" v-show="!collapseEditing" style="display:flex; flex-direction:column; gap:8px;">
+          <label class="toggle">
+            <input type="checkbox" v-model="editEnabled" />
+            <span>Enable brush editing (click/drag in viewport)</span>
+          </label>
+          <div style="display:grid; grid-template-columns:auto 1fr; gap:6px 10px; align-items:center;">
+            <label>Mode</label>
+            <select v-model="editMode">
+              <option value="add">Add (raise)</option>
+              <option value="remove">Remove (lower)</option>
+              <option value="smooth">Smooth (blend)</option>
+            </select>
+            <label>Radius (world units)</label>
+            <input type="number" v-model.number="editRadius" min="1" step="1" />
+            <label>Strength</label>
+            <input type="number" v-model.number="editStrength" step="0.1" />
+          </div>
+          <label class="toggle">
+            <input type="checkbox" v-model="editPreview" />
+            <span>Show brush preview</span>
+          </label>
+          <div style="display:flex; gap:8px;">
+            <button class="small" @click="saveEditedSMF()">Save Edited SMF</button>
+          </div>
+          <div class="status warn" v-if="editMode === 'smooth' && Number(editStrength) > 1">
+            Tip: Smooth strength is treated as 0..1 blend; values >1 will be clamped.
+          </div>
+        </div>
       </div>
 
       <div class="section">
