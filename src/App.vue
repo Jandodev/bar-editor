@@ -9,7 +9,7 @@ import { parseSMF, computeWorldSize, chooseStride, downsampleHeightField, u16ToF
 import { resolveMapPackageFromZip } from './lib/archive'
 import { parseMapinfoLua } from './lib/mapinfo'
 import { pickDirectoryAndCollectFiles } from './lib/folder'
-import { buildSMFFromFloatHeights, buildSMFFromFloatHeightsWithStubs, patchSMFHeightsInBuffer } from './lib/smf-writer'
+import { buildSMFFromFloatHeights, buildSMFFromFloatHeightsWithStubs, patchSMFHeightsInBuffer, patchSMFHeightsAndHeaderInBuffer } from './lib/smf-writer'
 import { saveBytesDialog, saveTextDialog } from './lib/save'
 import Toolbar from './components/app/Toolbar.vue'
 import StatusBar from './components/app/StatusBar.vue'
@@ -387,7 +387,7 @@ async function saveEditedSMF() {
       // Prefer the stride we used on load; fall back to deriving it
       const stride = Math.max(1, Number(strideUsed.value || Math.floor(smf.value.header.width / Math.max(1, downWNow - 1))))
       const fullHeights = upsampleHeightsBilinear(h, downWNow, downLNow, fullW, fullL, stride)
-      outBuf = patchSMFHeightsInBuffer(smfBufferOrig.value, fullHeights)
+      outBuf = patchSMFHeightsAndHeaderInBuffer(smfBufferOrig.value, fullHeights, { minHeight: minH, maxHeight: maxH })
     } else {
       // Fallback: write a fresh SMF with stubbed sections
       outBuf = buildSMFFromFloatHeightsWithStubs({

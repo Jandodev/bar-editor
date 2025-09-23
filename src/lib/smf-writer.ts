@@ -316,6 +316,92 @@ export function patchSMFHeightsInBuffer(orig: ArrayBuffer, heightFloat: Float32A
     - minHeight/maxHeight control scaling to uint16
     - Only header + heightmap are emitted; other sections omitted (offsets=0)
 */
+/** Patch an existing SMF buffer's heightmap and update header min/max in-place (returns a new ArrayBuffer copy).
+    - Preserves ALL other sections (type map, minimap, tile index, metal, features, extra headers)
+    - Recomputes or accepts minHeight/maxHeight and writes them into the header
+    - Re-encodes heightmap using the new [minHeight, maxHeight] range
+    - Expects heightFloat length to equal (width+1)*(length+1)
+*/
+export function patchSMFHeightsAndHeaderInBuffer(
+  orig: ArrayBuffer,
+  heightFloat: Float32Array,
+  opts?: { minHeight?: number; maxHeight?: number }
+): ArrayBuffer {
+  // Make a copy to avoid mutating the original buffer
+  const outBuf = orig.slice(0);
+  const dv = new DataView(outBuf);
+  const u8 = new Uint8Array(outBuf);
+  const le = true;
+
+  // Validate magic
+  const magicBytes = u8.subarray(0, 16);
+  const magicStr = new TextDecoder().decode(magicBytes);
+  if (!magicStr.startsWith('spring map file')) {
+    throw new Error('patchSMFHeightsAndHeaderInBuffer: invalid SMF magic');
+  }
+
+  let off = 16;
+  const version = dv.getInt32(off, le); off += 4;
+  if (version !== 1) {
+    try { console.warn?.('SMF patch (with header): version != 1 (got', version, ') proceeding'); } catch {}
+  }
+  /* id */                       off += 4;
+  const width = dv.getInt32(off, le); off += 4;
+  const length = dv.getInt32(off, le); off += 4;
+  /* squareSize */               off += 4;
+  /* texelsPerSquare */          off += 4;
+  /* tileSize */                 off += 4;
+
+  // Capture positions of header min/max so we can overwrite
+  const posMin = off;            /* minHeight */      off += 4;
+  const posMax = off;            /* maxHeight */      off += 4;
+
+  const ofsHeightMap = dv.getInt32(off, le); off += 4;
+  /* ofsTypeMap */               off += 4;
+  /* ofsTileIndex */             off += 4;
+  /* ofsMiniMap */               off += 4;
+  /* ofsMetalMap */              off += 4;
+  /* ofsFeatures */              off += 4;
+  /* numExtraHeaders */          off += 4;
+
+  const hmWidth = width + 1;
+  const hmLength = length + 1;
+  const hmCount = hmWidth * hmLength;
+  if (!(heightFloat instanceof Float32Array) || heightFloat.length !== hmCount) {
+    throw new Error(`patchSMFHeightsAndHeaderInBuffer: height length ${heightFloat?.length ?? 'n/a'} != expected ${hmCount}`);
+  }
+
+  // Determine new min/max from opts or data
+  let minH = (opts && typeof opts.minHeight === 'number') ? opts.minHeight : Infinity;
+  let maxH = (opts && typeof opts.maxHeight === 'number') ? opts.maxHeight : -Infinity;
+  if (!Number.isFinite(minH) || !Number.isFinite(maxH) || maxH <= minH) {
+    minH = Infinity; maxH = -Infinity;
+    for (let i = 0; i < hmCount; i++) {
+      const v = heightFloat[i];
+      if (!Number.isFinite(v)) continue;
+      if (v < minH) minH = v;
+      if (v > maxH) maxH = v;
+    }
+    if (!Number.isFinite(minH) || !Number.isFinite(maxH) || maxH <= minH) {
+      minH = 0; maxH = 1;
+    }
+  }
+
+  // Write new min/max into header
+  dv.setFloat32(posMin, minH, le);
+  dv.setFloat32(posMax, maxH, le);
+
+  // Encode float heights -> uint16 using new [minH, maxH]
+  const scale = 65535.0 / Math.max(1e-6, (maxH - minH));
+  for (let i = 0; i < hmCount; i++) {
+    const f = heightFloat[i];
+    const u = clampU16(Math.round((f - minH) * scale));
+    dv.setUint16(ofsHeightMap + i * 2, u, le);
+  }
+
+  return outBuf;
+}
+
 export function buildSMFFromFloatHeights(opts: {
   width: number;
   length: number;
