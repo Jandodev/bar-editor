@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onBeforeUnmount, onMounted } from 'vue'
 import ViewportHost from './components/editor/ViewportHost.vue'
 import { createResourceBus } from './lib/editor/resource-bus'
 import { viewportManager } from './lib/editor/viewport-manager'
@@ -16,6 +16,8 @@ import StatusBar from './components/app/StatusBar.vue'
 import PerfDrawer from './components/app/PerfDrawer.vue'
 import FilesExplorer from './components/panels/FilesExplorer.vue'
 import { filesState } from './state/files'
+import { brushRegistry } from './lib/brushes'
+import { getBrushDoc, getOverviewDoc } from './lib/brushes/docs'
 
 const smf = ref<SMFParsed | null>(null)
 const smfBufferOrig = ref<ArrayBuffer | null>(null)
@@ -215,10 +217,37 @@ const overlays = ref<OverlayControl[]>([])
 
 // Terrain editing config (shared to viewports via ResourceBus 'edit')
 const editEnabled = ref(false)
-const editMode = ref<'add' | 'remove' | 'smooth'>('add')
+const editMode = ref<string>('add')
 const editRadius = ref<number>(64)
 const editStrength = ref<number>(2)
 const editPreview = ref<boolean>(true)
+
+ // Dynamic brush list and docs
+const pluginBrushList = ref<{ id: string; label: string }[]>([])
+function refreshPlugins() {
+  try {
+    pluginBrushList.value = brushRegistry.list().map((b) => ({ id: b.id, label: b.label }))
+  } catch {
+    pluginBrushList.value = []
+  }
+}
+onMounted(() => {
+  // Initial fetch + microtask fallback in case plugins register slightly later
+  refreshPlugins()
+  setTimeout(refreshPlugins, 0)
+})
+const pluginBrushesFiltered = computed(() =>
+  pluginBrushList.value.filter((b) => b.id !== 'raise' && b.id !== 'lower' && b.id !== 'smooth')
+)
+const brushDocsOpen = ref(false)
+const activeDocMd = computed(() => {
+  const mode = editMode.value
+  const id = mode === 'add' ? 'raise' : mode === 'remove' ? 'lower' : mode
+  return getBrushDoc(id) || getOverviewDoc()
+})
+// Debug helpers to surface plugin load status in UI
+const pluginCount = computed(() => pluginBrushesFiltered.value.length)
+const pluginIdsCsv = computed(() => pluginBrushesFiltered.value.map(b => b.id).join(', '))
 
 // New flat SMF generation controls
 const newMapW = ref<number>(512)          // squares (X)
@@ -294,14 +323,28 @@ async function createFlatFromCurrent(loadOnly = true) {
   }
 }
 
-function upsampleHeightsNearest(down: Float32Array, downW: number, downL: number, fullW: number, fullL: number, stride: number): Float32Array {
+function upsampleHeightsBilinear(down: Float32Array, downW: number, downL: number, fullW: number, fullL: number, stride: number): Float32Array {
   const s = Math.max(1, Math.floor(stride || 1))
   const out = new Float32Array(fullW * fullL)
+  const maxX = downW - 1
+  const maxZ = downL - 1
   for (let z = 0; z < fullL; z++) {
-    const srcZ = Math.min(Math.floor(z / s), downL - 1)
+    const fz = z / s
+    const z0 = Math.min(Math.floor(fz), maxZ)
+    const z1 = Math.min(z0 + 1, maxZ)
+    const tz = Math.min(Math.max(fz - z0, 0), 1)
     for (let x = 0; x < fullW; x++) {
-      const srcX = Math.min(Math.floor(x / s), downW - 1)
-      out[z * fullW + x] = down[srcZ * downW + srcX] ?? 0
+      const fx = x / s
+      const x0 = Math.min(Math.floor(fx), maxX)
+      const x1 = Math.min(x0 + 1, maxX)
+      const tx = Math.min(Math.max(fx - x0, 0), 1)
+      const h00 = down[z0 * downW + x0] ?? 0
+      const h10 = down[z0 * downW + x1] ?? h00
+      const h01 = down[z1 * downW + x0] ?? h00
+      const h11 = down[z1 * downW + x1] ?? h00
+      const hx0 = h00 * (1 - tx) + h10 * tx
+      const hx1 = h01 * (1 - tx) + h11 * tx
+      out[z * fullW + x] = hx0 * (1 - tz) + hx1 * tz
     }
   }
   return out
@@ -343,7 +386,7 @@ async function saveEditedSMF() {
       const downLNow = gridLNow
       // Prefer the stride we used on load; fall back to deriving it
       const stride = Math.max(1, Number(strideUsed.value || Math.floor(smf.value.header.width / Math.max(1, downWNow - 1))))
-      const fullHeights = upsampleHeightsNearest(h, downWNow, downLNow, fullW, fullL, stride)
+      const fullHeights = upsampleHeightsBilinear(h, downWNow, downLNow, fullW, fullL, stride)
       outBuf = patchSMFHeightsInBuffer(smfBufferOrig.value, fullHeights)
     } else {
       // Fallback: write a fresh SMF with stubbed sections
@@ -1473,6 +1516,9 @@ export default defineComponent({
               <option value="atlas">Atlas</option>
               <option value="profiler">Profiler</option>
             </select>
+            <div class="plugins-status">
+              <small>Plugins loaded: {{ pluginCount }} <span v-if="pluginCount">({{ pluginIdsCsv }})</span></small>
+            </div>
           </div>
         </div>
       </div>
@@ -1503,9 +1549,16 @@ export default defineComponent({
           <div style="display:grid; grid-template-columns:auto 1fr; gap:6px 10px; align-items:center;">
             <label>Mode</label>
             <select v-model="editMode">
-              <option value="add">Add (raise)</option>
-              <option value="remove">Remove (lower)</option>
-              <option value="smooth">Smooth (blend)</option>
+              <optgroup label="Common">
+                <option value="add">Add (raise)</option>
+                <option value="remove">Remove (lower)</option>
+                <option value="smooth">Smooth (blend)</option>
+              </optgroup>
+              <optgroup label="Plugins">
+                <option v-for="b in pluginBrushesFiltered" :key="b.id" :value="b.id">
+                  {{ b.label || b.id }}
+                </option>
+              </optgroup>
             </select>
             <label>Radius (world units)</label>
             <input type="number" v-model.number="editRadius" min="1" step="1" />
@@ -1516,8 +1569,12 @@ export default defineComponent({
             <input type="checkbox" v-model="editPreview" />
             <span>Show brush preview</span>
           </label>
-          <div style="display:flex; gap:8px;">
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="small" @click="brushDocsOpen = !brushDocsOpen">{{ brushDocsOpen ? 'Hide' : 'Show' }} Brush Docs</button>
             <button class="small" @click="saveEditedSMF()">Save Edited SMF</button>
+          </div>
+          <div v-if="brushDocsOpen" class="brush-docs">
+            <pre class="md">{{ activeDocMd }}</pre>
           </div>
           <div class="status warn" v-if="editMode === 'smooth' && Number(editStrength) > 1">
             Tip: Smooth strength is treated as 0..1 blend; values >1 will be clamped.
@@ -1695,6 +1752,13 @@ export default defineComponent({
 }
 .section {
   margin-bottom: 16px;
+}
+.plugins-status {
+  margin-top: 4px;
+  color: #9aa0aa;
+}
+.plugins-status small {
+  font-size: 11px;
 }
 .section h3 {
   margin: 0 0 8px;
@@ -1964,5 +2028,20 @@ button.small {
   gap: 6px;
   padding: 6px;
   box-sizing: border-box;
+}
+.brush-docs {
+  margin-top: 8px;
+  border: 1px solid #2a2a2a;
+  background: #0f1115;
+  border-radius: 4px;
+  padding: 8px;
+  max-height: 240px;
+  overflow: auto;
+}
+.brush-docs .md {
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  font-size: 12px;
+  color: #cfd4e6;
 }
 </style>

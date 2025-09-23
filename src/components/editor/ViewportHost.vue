@@ -2,6 +2,7 @@
 import { onMounted, onBeforeUnmount, ref } from 'vue'
 import type { ResourceBus } from '../../lib/editor/resource-bus'
 import { viewportManager, type ViewportInstance } from '../../lib/editor/viewport-manager'
+import BrushHUD from './BrushHUD.vue'
 
 type Props = {
   pluginId: string
@@ -65,6 +66,8 @@ function onProfilerToggle() {
         <button v-if="pluginId === 'orthographic'" class="overlay-btn" @click="onProfilerToggle">Profiler</button>
       </div>
     </div>
+    <!-- Brush Heads-Up Display overlay (mouse-first controls) -->
+    <BrushHUD v-if="pluginId === 'perspective'" :bus="props.bus" />
     <div class="mount" ref="mountEl"></div>
   </div>
 </template>

@@ -4,7 +4,7 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls'
 import { DDSLoader } from 'three/examples/jsm/loaders/DDSLoader'
 import { TGALoader } from 'three/examples/jsm/loaders/TGALoader'
-import { applyAddRemove, applySmooth } from '../lib/terrain-edit'
+import { brushRegistry } from '../lib/brushes'
 
 type OverlayImage = {
   name: string
@@ -53,7 +53,7 @@ type Props = {
 
   // Editing
   editEnabled?: boolean
-  editMode?: 'add' | 'remove' | 'smooth'
+  editMode?: string
   editRadius?: number
   editStrength?: number
   editPreview?: boolean
@@ -77,9 +77,10 @@ const mouseNDC = new THREE.Vector2()
 let isPainting = false
 let lastPaintTs = 0
 
-// Brush preview/debug
+ // Brush preview/debug
 let brushCircle: THREE.Mesh | null = null
 let hitDot: THREE.Mesh | null = null
+let brushRing: THREE.Line | null = null
 let lastHitY = 0
 
 // Profiler metrics (lightweight, toggled by props.profilerMode)
@@ -139,11 +140,29 @@ function createBrushPreviewIfNeeded() {
     hitDot.visible = false
     scene.add(hitDot)
   }
+  if (!brushRing) {
+    const seg = 128
+    const pts: THREE.Vector3[] = []
+    for (let i = 0; i < seg; i++) {
+      const a = (i / seg) * Math.PI * 2
+      pts.push(new THREE.Vector3(Math.cos(a), 0, Math.sin(a)))
+    }
+    const g = new THREE.BufferGeometry().setFromPoints(pts)
+    g.rotateX(-Math.PI / 2)
+    brushRing = new THREE.LineLoop(
+      g,
+      new THREE.LineBasicMaterial({ color: 0xff3333, depthTest: false, depthWrite: false })
+    )
+    brushRing.renderOrder = 11
+    brushRing.visible = false
+    scene.add(brushRing)
+  }
 }
 
 function setBrushPreviewVisible(v: boolean) {
   if (brushCircle) brushCircle.visible = v
   if (hitDot) hitDot.visible = v
+  if (brushRing) brushRing.visible = v
 }
 
 function updateBrushPreview(x: number, y: number, z: number) {
@@ -160,6 +179,11 @@ function updateBrushPreview(x: number, y: number, z: number) {
     hitDot.scale.set(s, s, s)
     hitDot.position.set(x, y + 0.03, z)
     hitDot.visible = !!props.editEnabled && !!props.editPreview
+  }
+  if (brushRing) {
+    brushRing.position.set(x, y + 0.025, z)
+    brushRing.scale.set(r, r, r)
+    brushRing.visible = !!props.editEnabled && !!props.editPreview
   }
 }
 
@@ -184,33 +208,26 @@ function getBrushCenter(ev: PointerEvent): { x: number; y: number; z: number } |
 
 function applyBrushAt(x: number, z: number) {
   if (!props.heights) return
-  const mode = (props.editMode ?? 'add')
+  const mode = String(props.editMode ?? 'add')
   const radius = Number(props.editRadius ?? 64)
   const strength = Number(props.editStrength ?? 2)
-  let next: Float32Array | null = null
   const tBrush0 = performance.now()
-  if (mode === 'smooth') {
-    next = applySmooth(
-      props.heights,
-      props.gridW, props.gridL,
-      props.widthWorld, props.lengthWorld,
-      x, z,
-      radius,
-      Math.max(0, Math.min(1, strength))
-    )
-  } else {
-    const delta = mode === 'remove' ? -Math.abs(strength) : Math.abs(strength)
-    next = applyAddRemove(
-      props.heights,
-      props.gridW, props.gridL,
-      props.widthWorld, props.lengthWorld,
-      x, z,
-      radius,
-      delta
-    )
-  }
+  // Back-compat mapping: 'add' -> 'raise', 'remove' -> 'lower', other strings map directly to brush id.
+  const id = mode === 'add' ? 'raise' : mode === 'remove' ? 'lower' : mode
+  const brush = brushRegistry.get(id)
+  if (!brush) return
+  const next = brush.apply({
+    heights: props.heights,
+    gridW: props.gridW, gridL: props.gridL,
+    widthWorld: props.widthWorld, lengthWorld: props.lengthWorld,
+    centerX: x, centerZ: z,
+    radiusWorld: radius,
+    strength,
+    hitY: lastHitY,
+    mode
+  })
   profBrushMs.value = performance.now() - tBrush0
-  if (next) emit('editHeights', next)
+  emit('editHeights', next)
 }
 
 function onPointerDown(ev: PointerEvent) {
@@ -1126,9 +1143,9 @@ watch(
 watch(
   () => props.editRadius,
   () => {
-    if (!brushCircle) return
     const r = Number(props.editRadius ?? 64)
-    brushCircle.scale.set(r, r, 1)
+    if (brushCircle) brushCircle.scale.set(r, r, 1)
+    if (brushRing) brushRing.scale.set(r, r, r)
   }
 )
 

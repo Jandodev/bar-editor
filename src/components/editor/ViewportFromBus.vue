@@ -37,7 +37,7 @@ const state = reactive({
 
   // Editing config (shared via bus 'edit')
   editEnabled: false,
-  editMode: 'add' as 'add' | 'remove' | 'smooth',
+  editMode: 'add' as string,
   editRadius: 64,
   editStrength: 2,
   editPreview: true,
@@ -95,8 +95,8 @@ onMounted(() => {
   const updateEdit = (v: any) => {
     v = v || {}
     state.editEnabled = !!v.enabled
-    const m = String(v.mode || state.editMode)
-    state.editMode = (m === 'remove' || m === 'smooth') ? (m as any) : 'add'
+    const m = String(v.mode ?? state.editMode ?? 'add')
+    state.editMode = m
     const r = Number(v.radius); state.editRadius = Number.isFinite(r) ? r : state.editRadius
     const s = Number(v.strength); state.editStrength = Number.isFinite(s) ? s : state.editStrength
     state.editPreview = !!v.preview
