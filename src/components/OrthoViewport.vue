@@ -57,11 +57,12 @@ type Props = {
   editRadius?: number
   editStrength?: number
   editPreview?: boolean
+  previewPos?: { x: number; y: number; z: number }
   profilerMode?: boolean
 }
 
 const props = defineProps<Props>()
-const emit = defineEmits<{ (e: 'fps', fps: number): void; (e: 'editHeights', h: Float32Array): void }>()
+const emit = defineEmits<{ (e: 'fps', fps: number): void; (e: 'editHeights', h: Float32Array): void; (e: 'editCursor', pos: { x: number; y: number; z: number }): void }>()
 
 const container = ref<HTMLDivElement | null>(null)
 let renderer: THREE.WebGLRenderer | null = null
@@ -81,6 +82,10 @@ let lastPaintTs = 0
 let brushCircle: THREE.Mesh | null = null
 let hitDot: THREE.Mesh | null = null
 let brushRing: THREE.Line | null = null
+let brushSphere: THREE.LineSegments | null = null
+let brushInnerSphere: THREE.LineSegments | null = null
+let brushSphereMat: THREE.LineBasicMaterial | null = null
+let brushInnerSphereMat: THREE.LineBasicMaterial | null = null
 let lastHitY = 0
 
 // Profiler metrics (lightweight, toggled by props.profilerMode)
@@ -123,7 +128,7 @@ function createBrushPreviewIfNeeded() {
     const mat = new THREE.MeshBasicMaterial({
       color: 0x33aaff,
       transparent: true,
-      opacity: 0.2,
+      opacity: 0.3,
       depthWrite: false,
       depthTest: false,
     })
@@ -151,18 +156,40 @@ function createBrushPreviewIfNeeded() {
     g.rotateX(-Math.PI / 2)
     brushRing = new THREE.LineLoop(
       g,
-      new THREE.LineBasicMaterial({ color: 0xff3333, depthTest: false, depthWrite: false })
+      new THREE.LineBasicMaterial({ color: 0xff3333, depthTest: false, depthWrite: false, transparent: true, opacity: 0.3 })
     )
     brushRing.renderOrder = 11
     brushRing.visible = false
     scene.add(brushRing)
   }
+  // 3D wireframe spheres (match perspective view)
+  if (!brushSphere) {
+    const sGeo = new THREE.SphereGeometry(1, 16, 12)
+    const wGeo = new THREE.WireframeGeometry(sGeo)
+    brushSphereMat = new THREE.LineBasicMaterial({ color: 0x33aaff, transparent: true, opacity: 0.3, depthWrite: false, depthTest: false })
+    brushSphere = new THREE.LineSegments(wGeo, brushSphereMat)
+    brushSphere.renderOrder = 12
+    brushSphere.visible = false
+    scene.add(brushSphere)
+  }
+  if (!brushInnerSphere) {
+    const sGeo2 = new THREE.SphereGeometry(1, 12, 8)
+    const wGeo2 = new THREE.WireframeGeometry(sGeo2)
+    brushInnerSphereMat = new THREE.LineBasicMaterial({ color: 0xff5555, transparent: true, opacity: 0.3, depthWrite: false, depthTest: false })
+    brushInnerSphere = new THREE.LineSegments(wGeo2, brushInnerSphereMat)
+    brushInnerSphere.renderOrder = 13
+    brushInnerSphere.visible = false
+    scene.add(brushInnerSphere)
+  }
 }
 
 function setBrushPreviewVisible(v: boolean) {
-  if (brushCircle) brushCircle.visible = v
+  // Prefer 3D wireframe spheres in ortho as well
+  if (brushCircle) brushCircle.visible = false
   if (hitDot) hitDot.visible = v
-  if (brushRing) brushRing.visible = v
+  if (brushRing) brushRing.visible = false
+  if (brushSphere) brushSphere.visible = v
+  if (brushInnerSphere) brushInnerSphere.visible = v
 }
 
 function updateBrushPreview(x: number, y: number, z: number) {
@@ -170,9 +197,8 @@ function updateBrushPreview(x: number, y: number, z: number) {
   lastHitY = y
   const r = Number(props.editRadius ?? 64)
   if (brushCircle) {
-    brushCircle.position.set(x, y + 0.02, z)
-    brushCircle.scale.set(r, r, 1)
-    brushCircle.visible = !!props.editEnabled && !!props.editPreview
+    // Hide legacy circle; sphere preview supersedes it
+    brushCircle.visible = false
   }
   if (hitDot) {
     const s = Math.max(0.5, Math.min(5, r * 0.05))
@@ -181,9 +207,36 @@ function updateBrushPreview(x: number, y: number, z: number) {
     hitDot.visible = !!props.editEnabled && !!props.editPreview
   }
   if (brushRing) {
-    brushRing.position.set(x, y + 0.025, z)
-    brushRing.scale.set(r, r, r)
-    brushRing.visible = !!props.editEnabled && !!props.editPreview
+    // Hide legacy ring; sphere preview supersedes it
+    brushRing.visible = false
+  }
+  // Wireframe spheres for full 3D footprint visualization
+  if (brushSphere) {
+    brushSphere.position.set(x, y, z)
+    brushSphere.scale.set(r, r, r)
+    brushSphere.visible = !!props.editEnabled && !!props.editPreview
+    if (brushSphereMat) {
+      const strength = Number(props.editStrength ?? 0)
+      const sNorm = Math.max(0, Math.min(1, strength / 5))
+      const color = new THREE.Color()
+      color.setHSL(0.6 * (1 - sNorm), 1, 0.5)
+      brushSphereMat.color.copy(color)
+      brushSphereMat.opacity = 0.3
+    }
+  }
+  if (brushInnerSphere) {
+    const strength = Number(props.editStrength ?? 0)
+    const sNorm = Math.max(0, Math.min(1, strength / 5))
+    const innerR = Math.max(0.05, r * sNorm)
+    brushInnerSphere.position.set(x, y, z)
+    brushInnerSphere.scale.set(innerR, innerR, innerR)
+    brushInnerSphere.visible = !!props.editEnabled && !!props.editPreview && sNorm > 0
+    if (brushInnerSphereMat) {
+      const color = new THREE.Color()
+      color.setHSL(0.0 + 0.6 * sNorm, 1, 0.5)
+      brushInnerSphereMat.color.copy(color)
+      brushInnerSphereMat.opacity = 0.3
+    }
   }
 }
 
@@ -235,6 +288,7 @@ function onPointerDown(ev: PointerEvent) {
   if (ev.button !== 0) return
   const c = getBrushCenter(ev)
   if (!c) return
+  emit('editCursor', c)
   isPainting = true
   lastPaintTs = 0
   if (controls) (controls as any).enabled = false
@@ -248,6 +302,7 @@ function onPointerDown(ev: PointerEvent) {
 function onPointerMove(ev: PointerEvent) {
   if (!renderer) return
   const c = getBrushCenter(ev)
+  if (c) { emit('editCursor', c) }
   if (c && props.editEnabled && props.editPreview) {
     updateBrushPreview(c.x, c.y, c.z)
   }
@@ -1130,12 +1185,23 @@ watch(
   { deep: true }
 )
 
-// Preview visibility toggles
+ // Preview visibility toggles
 watch(
   () => [props.editEnabled, props.editPreview],
   () => {
     createBrushPreviewIfNeeded()
     setBrushPreviewVisible(!!props.editEnabled && !!props.editPreview)
+  }
+)
+
+// Sync preview position from bus
+watch(
+  () => props.previewPos,
+  () => {
+    const p = props.previewPos as any
+    if (p && typeof p.x === 'number' && typeof p.y === 'number' && typeof p.z === 'number') {
+      updateBrushPreview(p.x, p.y, p.z)
+    }
   }
 )
 
@@ -1146,6 +1212,38 @@ watch(
     const r = Number(props.editRadius ?? 64)
     if (brushCircle) brushCircle.scale.set(r, r, 1)
     if (brushRing) brushRing.scale.set(r, r, r)
+    if (brushSphere) brushSphere.scale.set(r, r, r)
+    if (brushInnerSphere) {
+      const strength = Number(props.editStrength ?? 0)
+      const sNorm = Math.max(0, Math.min(1, strength / 5))
+      const innerR = Math.max(0.05, r * sNorm)
+      brushInnerSphere.scale.set(innerR, innerR, innerR)
+    }
+  }
+)
+
+watch(
+  () => props.editStrength,
+  () => {
+    const r = Number(props.editRadius ?? 64)
+    const strength = Number(props.editStrength ?? 0)
+    const sNorm = Math.max(0, Math.min(1, strength / 5))
+    if (brushSphereMat) {
+      const color = new THREE.Color()
+      color.setHSL(0.6 * (1 - sNorm), 1, 0.5)
+      brushSphereMat.color.copy(color)
+      brushSphereMat.opacity = 0.3
+    }
+    if (brushInnerSphere) {
+      const innerR = Math.max(0.05, r * sNorm)
+      brushInnerSphere.scale.set(innerR, innerR, innerR)
+      if (brushInnerSphereMat) {
+        const color = new THREE.Color()
+        color.setHSL(0.0 + 0.6 * sNorm, 1, 0.5)
+        brushInnerSphereMat.color.copy(color)
+        brushInnerSphereMat.opacity = 0.3
+      }
+    }
   }
 )
 

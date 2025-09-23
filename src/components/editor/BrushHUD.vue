@@ -19,6 +19,11 @@ const state = reactive({
   open: false,
   hoverRadius: false,
   hoverStrength: false,
+  // scrubby slider
+  dragging: false,
+  dragWhat: '' as 'radius' | 'strength' | '',
+  dragStartX: 0,
+  dragStartValue: 0,
 })
 
 function publishEdit(partial: Partial<{ enabled: boolean; mode: string; radius: number; strength: number; preview: boolean }>) {
@@ -67,21 +72,30 @@ try {
   })
 } catch {}
 
-onBeforeUnmount(() => { try { unsub?.() } catch {} })
+onBeforeUnmount(() => {
+  try { unsub?.() } catch {}
+  if (state.dragging) {
+    try { window.removeEventListener('mousemove', onScrubMove as any) } catch {}
+    try { window.removeEventListener('mouseup', endScrub as any) } catch {}
+    try { (document.body.style as any).cursor = '' } catch {}
+    state.dragging = false
+    state.dragWhat = ''
+  }
+})
 onMounted(() => {
   // no-op currently
 })
 
 // Brushes
-const brushesAll = computed(() => brushRegistry.list().map(b => ({ id: b.id, label: b.label || b.id })))
+const brushesAll = computed(() => brushRegistry.list().map((b: any) => ({ id: b.id, label: b.label || b.id })))
 const common = computed(() => [
   { id: 'add', label: 'Add (raise)' },
   { id: 'remove', label: 'Remove (lower)' },
   { id: 'smooth', label: 'Smooth' },
 ])
 const pluginBrushes = computed(() => {
-  const idsCommon = new Set(common.value.map(b => b.id))
-  return brushesAll.value.filter(b => !idsCommon.has(b.id) && b.id !== 'raise' && b.id !== 'lower')
+  const idsCommon = new Set(common.value.map((b: any) => b.id))
+  return brushesAll.value.filter((b: any) => !idsCommon.has(b.id) && b.id !== 'raise' && b.id !== 'lower')
 })
 
 // Mapping: UI "add/remove" to 'raise'/'lower' mode for runtime
@@ -132,6 +146,40 @@ function onWheelStrength(ev: WheelEvent) {
   const coarse = ev.shiftKey ? 0.5 : 0.1
   adjustStrength(ev.deltaY > 0 ? -coarse : +coarse)
 }
+
+// Photoshop-style "scrubby slider" on value fields
+function startScrub(what: 'radius' | 'strength', ev: MouseEvent) {
+  ev.preventDefault()
+  state.dragging = true
+  state.dragWhat = what
+  state.dragStartX = ev.clientX
+  state.dragStartValue = what === 'radius' ? state.radius : state.strength
+  try { document.body.style.cursor = 'ew-resize' } catch {}
+  window.addEventListener('mousemove', onScrubMove as any, { passive: true } as any)
+  window.addEventListener('mouseup', endScrub as any)
+}
+function onScrubMove(ev: MouseEvent) {
+  if (!state.dragging) return
+  const dx = ev.clientX - state.dragStartX
+  if (state.dragWhat === 'radius') {
+    const stepPerPx = ev.shiftKey ? 1 : 0.25 // coarse with Shift
+    const next = Math.max(1, Math.round(state.dragStartValue + dx * stepPerPx))
+    publishEdit({ radius: next })
+  } else if (state.dragWhat === 'strength') {
+    const stepPerPx = ev.shiftKey ? 0.1 : 0.02 // coarse with Shift
+    let raw = state.dragStartValue + dx * stepPerPx
+    raw = Math.max(0, Math.round(raw * 100) / 100)
+    publishEdit({ strength: raw })
+  }
+}
+function endScrub() {
+  if (!state.dragging) return
+  state.dragging = false
+  state.dragWhat = ''
+  try { document.body.style.cursor = '' } catch {}
+  try { window.removeEventListener('mousemove', onScrubMove as any) } catch {}
+  try { window.removeEventListener('mouseup', endScrub as any) } catch {}
+}
 </script>
 
 <template>
@@ -171,17 +219,17 @@ function onWheelStrength(ev: WheelEvent) {
       <!-- Radius -->
       <div class="group small" @wheel.passive.prevent="onWheelRadius" @mouseenter="state.hoverRadius = true" @mouseleave="state.hoverRadius = false">
         <span class="hint">Radius</span>
-        <button class="btn" @click="adjustRadius(+1)">+</button>
-        <div class="value">{{ state.radius }}</div>
         <button class="btn" @click="adjustRadius(-1)">-</button>
+        <div class="value" @mousedown.prevent="startScrub('radius', $event)">{{ state.radius }}</div>
+        <button class="btn" @click="adjustRadius(+1)">+</button>
       </div>
 
       <!-- Strength -->
       <div class="group small" @wheel.passive.prevent="onWheelStrength" @mouseenter="state.hoverStrength = true" @mouseleave="state.hoverStrength = false">
         <span class="hint">Strength</span>
-        <button class="btn" @click="adjustStrength(+0.1)">+</button>
-        <div class="value">{{ state.strength }}</div>
         <button class="btn" @click="adjustStrength(-0.1)">-</button>
+        <div class="value" @mousedown.prevent="startScrub('strength', $event)">{{ state.strength }}</div>
+        <button class="btn" @click="adjustStrength(+0.1)">+</button>
       </div>
 
       <!-- Preview toggle -->
@@ -262,6 +310,8 @@ function onWheelStrength(ev: WheelEvent) {
   border: 1px solid #2a2f3a;
   border-radius: 6px;
   background: #12151a;
+  cursor: ew-resize;
+  user-select: none;
 }
 
 .btn {

@@ -41,6 +41,9 @@ const state = reactive({
   editRadius: 64,
   editStrength: 2,
   editPreview: true,
+
+  // Synced preview position shared across viewports
+  previewPos: null as { x: number; y: number; z: number } | null,
 })
 
 let unsubs: Array<() => void> = []
@@ -102,6 +105,11 @@ onMounted(() => {
     state.editPreview = !!v.preview
   }
 
+  const updateEditCursor = (p: any) => {
+    if (!p || typeof p.x !== 'number' || typeof p.y !== 'number' || typeof p.z !== 'number') return
+    state.previewPos = { x: p.x, y: p.y, z: p.z }
+  }
+
   // initial snapshot
   const t = bus.get('terrain'); if (t) updateTerrain(t as any)
   updateMetal(bus.get('metal'))
@@ -112,6 +120,7 @@ onMounted(() => {
   updateImages(bus.get('images'))
   updateOrtho(bus.get('ortho'))
   updateEdit(bus.get('edit'))
+  updateEditCursor(bus.get('editCursor'))
 
   // subscribe to updates
   unsubs = [
@@ -124,6 +133,7 @@ onMounted(() => {
     bus.subscribe('images', updateImages as any),
     bus.subscribe('ortho', updateOrtho as any),
     bus.subscribe('edit', updateEdit as any),
+    bus.subscribe('editCursor', updateEditCursor as any),
   ]
 })
 
@@ -168,6 +178,12 @@ function onFps(newFps: number) {
     ;(props.bus as any).set('perf', payload)
   } catch {}
 }
+
+function onEditCursor(pos: { x: number; y: number; z: number }) {
+  try {
+    ;(props.bus as any).set('editCursor', pos)
+  } catch {}
+}
 </script>
 
 <template>
@@ -189,6 +205,7 @@ function onFps(newFps: number) {
     :showGrid="state.showGrid"
     :overlays="state.overlays"
     :env="state.env"
+    :previewPos="(state.previewPos as any)"
     v-bind="mode === 'orthographic' ? { screenRotationQuarter: state.screenRotationQuarter, atlasMode: state.atlasMode, atlasImages: state.images, profilerMode: state.profilerMode } : {}"
     :editEnabled="state.editEnabled"
     :editMode="state.editMode"
@@ -197,5 +214,6 @@ function onFps(newFps: number) {
     :editPreview="state.editPreview"
     @editHeights="onEditHeights"
     @fps="onFps"
+    @editCursor="onEditCursor"
   />
 </template>
