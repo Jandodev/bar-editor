@@ -41,6 +41,7 @@ const state = reactive({
   editRadius: 64,
   editStrength: 2,
   editPreview: true,
+  editParams: {} as Record<string, any>,
 
   // Synced preview position shared across viewports
   previewPos: null as { x: number; y: number; z: number } | null,
@@ -103,6 +104,7 @@ onMounted(() => {
     const r = Number(v.radius); state.editRadius = Number.isFinite(r) ? r : state.editRadius
     const s = Number(v.strength); state.editStrength = Number.isFinite(s) ? s : state.editStrength
     state.editPreview = !!v.preview
+    state.editParams = (v.params && typeof v.params === 'object') ? { ...v.params } : state.editParams
   }
 
   const updateEditCursor = (p: any) => {
@@ -206,6 +208,7 @@ function onEditCursor(pos: { x: number; y: number; z: number }) {
     :overlays="state.overlays"
     :env="state.env"
     :previewPos="(state.previewPos as any)"
+    :editParams="(state.editParams as any)"
     v-bind="mode === 'orthographic' ? { screenRotationQuarter: state.screenRotationQuarter, atlasMode: state.atlasMode, atlasImages: state.images, profilerMode: state.profilerMode } : {}"
     :editEnabled="state.editEnabled"
     :editMode="state.editMode"

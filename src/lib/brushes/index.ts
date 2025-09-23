@@ -33,14 +33,46 @@ export interface BrushApplyArgs {
   // Optional additional context (e.g., flatten target elevation under cursor)
   hitY?: number
 
+  // Optional free-form parameters specific to each brush
+  // Values are validated/interpreted by the brush itself
+  params?: Record<string, any>
+
   // Optional mode string for brushes that support multiple sub-modes
   // (kept for backward-compat; prefer separate brushes instead)
   mode?: string
 }
 
+/** Declarative parameter definitions for dynamic UI generation. */
+export type BrushParamDef =
+  | {
+      key: string
+      label: string
+      type: 'number'
+      default: number
+      min?: number
+      max?: number
+      step?: number
+      unit?: string
+    }
+  | {
+      key: string
+      label: string
+      type: 'boolean'
+      default: boolean
+    }
+  | {
+      key: string
+      label: string
+      type: 'select'
+      default: string
+      options: { label: string; value: string }[]
+    }
+
 export interface Brush {
   id: BrushId
   label: string
+  /** Optional param schema to drive adaptive HUD controls */
+  params?: BrushParamDef[]
   // Must return a NEW Float32Array so upstream watchers see a reference change
   apply(args: BrushApplyArgs): Float32Array
 }

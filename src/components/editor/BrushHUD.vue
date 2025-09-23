@@ -15,6 +15,8 @@ const state = reactive({
   radius: 64,
   strength: 2,
   preview: true,
+  // dynamic brush params (auto UI)
+  params: {} as Record<string, any>,
   // palette
   open: false,
   hoverRadius: false,
@@ -26,7 +28,7 @@ const state = reactive({
   dragStartValue: 0,
 })
 
-function publishEdit(partial: Partial<{ enabled: boolean; mode: string; radius: number; strength: number; preview: boolean }>) {
+function publishEdit(partial: Partial<{ enabled: boolean; mode: string; radius: number; strength: number; preview: boolean; params: Record<string, any> }>) {
   const next = {
     enabled: state.enabled,
     mode: state.mode,
@@ -41,12 +43,16 @@ function publishEdit(partial: Partial<{ enabled: boolean; mode: string; radius: 
   state.radius = Number(next.radius)
   state.strength = Number(next.strength)
   state.preview = !!next.preview
+  if (partial && typeof (partial as any).params === 'object') {
+    state.params = { ...(partial as any).params }
+  }
   ;(props.bus as any).set('edit', {
     enabled: state.enabled,
     mode: state.mode,
     radius: state.radius,
     strength: state.strength,
     preview: state.preview,
+    params: state.params,
   })
 }
 
@@ -58,6 +64,7 @@ try {
   if (Number.isFinite(e.radius)) state.radius = Number(e.radius)
   if (Number.isFinite(e.strength)) state.strength = Number(e.strength)
   if (typeof e.preview === 'boolean') state.preview = !!e.preview
+  if (e && typeof e.params === 'object') state.params = { ...e.params }
 } catch {}
 // Subscribe to external changes
 let unsub: (() => void) | null = null
@@ -69,6 +76,7 @@ try {
     if (Number.isFinite(e.radius)) state.radius = Number(e.radius)
     if (Number.isFinite(e.strength)) state.strength = Number(e.strength)
     if (typeof e.preview === 'boolean') state.preview = !!e.preview
+    if (e && typeof e.params === 'object') state.params = { ...e.params }
   })
 } catch {}
 
@@ -83,7 +91,7 @@ onBeforeUnmount(() => {
   }
 })
 onMounted(() => {
-  // no-op currently
+  ensureParamsForBrush()
 })
 
 // Brushes
@@ -97,6 +105,70 @@ const pluginBrushes = computed(() => {
   const idsCommon = new Set(common.value.map((b: any) => b.id))
   return brushesAll.value.filter((b: any) => !idsCommon.has(b.id) && b.id !== 'raise' && b.id !== 'lower')
 })
+
+// Dynamic param definitions for current brush
+const currentParamDefs = computed(() => {
+  try {
+    const brush = brushRegistry.get(state.mode)
+    const defs = (brush as any)?.params
+    return Array.isArray(defs) ? defs : []
+  } catch {
+    return []
+  }
+})
+
+function ensureParamsForBrush() {
+  const defs: any[] = currentParamDefs.value as any
+  const next: Record<string, any> = {}
+  for (const def of defs) {
+    const key = def?.key
+    if (!key) continue
+    let v = state.params?.[key]
+    if (v === undefined) v = def.default
+    next[key] = v
+  }
+  state.params = next
+}
+
+// Helpers to update params
+function setParam(key: string, value: any) {
+  const next = { ...(state.params || {}), [key]: value }
+  publishEdit({ params: next })
+}
+function adjustParamNumber(def: any, deltaUnits: number) {
+  const step = Number(def?.step ?? 1)
+  const min = Number.isFinite(def?.min) ? Number(def.min) : -Infinity
+  const max = Number.isFinite(def?.max) ? Number(def.max) : +Infinity
+  const curr = Number((state.params || {})[def.key] ?? def.default)
+  let next = curr + deltaUnits * step
+  if (Number.isFinite(min)) next = Math.max(min, next)
+  if (Number.isFinite(max)) next = Math.min(max, next)
+  // snap to step
+  if (step > 0) next = Math.round(next / step) * step
+  setParam(def.key, next)
+}
+function onWheelParamNumber(def: any, ev: WheelEvent) {
+  ev.preventDefault()
+  const mult = ev.shiftKey ? 5 : 1
+  adjustParamNumber(def, (ev.deltaY > 0 ? -1 : +1) * mult)
+}
+function toggleParamBoolean(def: any) {
+  const curr = !!((state.params || {})[def.key] ?? def.default)
+  setParam(def.key, !curr)
+}
+function cycleParamSelect(def: any) {
+  const opts = Array.isArray(def?.options) ? def.options : []
+  const curr = (state.params || {})[def.key] ?? def.default
+  const idx = Math.max(0, opts.findIndex((o: any) => o?.value === curr))
+  const next = opts[(idx + 1) % Math.max(1, opts.length)]?.value ?? curr
+  setParam(def.key, next)
+}
+function getSelectLabel(def: any): string {
+  const opts = Array.isArray(def?.options) ? def.options : []
+  const curr = (state.params || {})[def.key] ?? def.default
+  const found = opts.find((o: any) => o?.value === curr)
+  return found?.label ?? String(curr)
+}
 
 // Mapping: UI "add/remove" to 'raise'/'lower' mode for runtime
 function normalizeIdForUISelect(id: string): string {
@@ -114,6 +186,9 @@ function pickBrush(id: string) {
   state.open = false
   const runtime = toRuntimeBrushId(id)
   publishEdit({ mode: runtime })
+  // Initialize params for the selected brush
+  ensureParamsForBrush()
+  publishEdit({ params: state.params })
 }
 
 function toggleEnabled() {
@@ -138,13 +213,15 @@ function adjustStrength(delta: number) {
 
 function onWheelRadius(ev: WheelEvent) {
   ev.preventDefault()
-  const coarse = ev.shiftKey ? 8 : 1
-  adjustRadius(ev.deltaY > 0 ? -coarse : +coarse)
+  // Alt = fine, Shift = coarse, default = medium
+  const step = ev.altKey ? 1 : ev.shiftKey ? 25 : 10
+  adjustRadius(ev.deltaY > 0 ? -step : +step)
 }
 function onWheelStrength(ev: WheelEvent) {
   ev.preventDefault()
-  const coarse = ev.shiftKey ? 0.5 : 0.1
-  adjustStrength(ev.deltaY > 0 ? -coarse : +coarse)
+  // Alt = fine, Shift = coarse, default = medium
+  const step = ev.altKey ? 0.5 : ev.shiftKey ? 5 : 1
+  adjustStrength(ev.deltaY > 0 ? -step : +step)
 }
 
 // Photoshop-style "scrubby slider" on value fields
@@ -162,11 +239,15 @@ function onScrubMove(ev: MouseEvent) {
   if (!state.dragging) return
   const dx = ev.clientX - state.dragStartX
   if (state.dragWhat === 'radius') {
-    const stepPerPx = ev.shiftKey ? 1 : 0.25 // coarse with Shift
+    // Dynamic scrub speed by current size; Alt = fine, Shift = coarse
+    const base = state.radius >= 500 ? 10 : state.radius >= 200 ? 5 : state.radius >= 100 ? 2 : 0.5
+    const stepPerPx = ev.altKey ? base * 0.2 : ev.shiftKey ? base * 2 : base
     const next = Math.max(1, Math.round(state.dragStartValue + dx * stepPerPx))
     publishEdit({ radius: next })
   } else if (state.dragWhat === 'strength') {
-    const stepPerPx = ev.shiftKey ? 0.1 : 0.02 // coarse with Shift
+    // Dynamic scrub speed by current strength; Alt = fine, Shift = coarse
+    const base = state.strength >= 50 ? 2 : state.strength >= 10 ? 1 : 0.2
+    const stepPerPx = ev.altKey ? base * 0.2 : ev.shiftKey ? base * 2 : base
     let raw = state.dragStartValue + dx * stepPerPx
     raw = Math.max(0, Math.round(raw * 100) / 100)
     publishEdit({ strength: raw })
@@ -219,18 +300,36 @@ function endScrub() {
       <!-- Radius -->
       <div class="group small" @wheel.passive.prevent="onWheelRadius" @mouseenter="state.hoverRadius = true" @mouseleave="state.hoverRadius = false">
         <span class="hint">Radius</span>
-        <button class="btn" @click="adjustRadius(-1)">-</button>
+        <button class="btn" @click="adjustRadius(-10)">-</button>
         <div class="value" @mousedown.prevent="startScrub('radius', $event)">{{ state.radius }}</div>
-        <button class="btn" @click="adjustRadius(+1)">+</button>
+        <button class="btn" @click="adjustRadius(+10)">+</button>
       </div>
 
       <!-- Strength -->
       <div class="group small" @wheel.passive.prevent="onWheelStrength" @mouseenter="state.hoverStrength = true" @mouseleave="state.hoverStrength = false">
         <span class="hint">Strength</span>
-        <button class="btn" @click="adjustStrength(-0.1)">-</button>
+        <button class="btn" @click="adjustStrength(-1)">-</button>
         <div class="value" @mousedown.prevent="startScrub('strength', $event)">{{ state.strength }}</div>
-        <button class="btn" @click="adjustStrength(+0.1)">+</button>
+        <button class="btn" @click="adjustStrength(+1)">+</button>
       </div>
+
+      <!-- Dynamic brush params -->
+      <template v-for="def in currentParamDefs" :key="def.key">
+        <div v-if="def.type === 'number'" class="group small" @wheel.passive.prevent="onWheelParamNumber(def, $event)">
+          <span class="hint">{{ def.label }}</span>
+          <button class="btn" @click="adjustParamNumber(def, -1)">-</button>
+          <div class="value">{{ (state.params?.[def.key] ?? def.default) }}</div>
+          <button class="btn" @click="adjustParamNumber(def, +1)">+</button>
+        </div>
+        <button v-else-if="def.type === 'boolean'" class="pill" :class="{ on: !!state.params?.[def.key] }" @click="toggleParamBoolean(def)">
+          <span class="dot" :class="{ on: !!state.params?.[def.key] }"></span>
+          <span>{{ def.label }}</span>
+        </button>
+        <div v-else-if="def.type === 'select'" class="group small">
+          <span class="hint">{{ def.label }}</span>
+          <button class="btn" @click="cycleParamSelect(def)">{{ getSelectLabel(def) }}</button>
+        </div>
+      </template>
 
       <!-- Preview toggle -->
       <button class="pill" :class="{ on: state.preview }" @click="publishEdit({ preview: !state.preview })" title="Toggle brush preview">

@@ -58,6 +58,7 @@ type Props = {
   editStrength?: number
   editPreview?: boolean
   previewPos?: { x: number; y: number; z: number }
+  editParams?: Record<string, any>
   profilerMode?: boolean
 }
 
@@ -82,11 +83,18 @@ let lastPaintTs = 0
 let brushCircle: THREE.Mesh | null = null
 let hitDot: THREE.Mesh | null = null
 let brushRing: THREE.Line | null = null
-let brushSphere: THREE.LineSegments | null = null
-let brushInnerSphere: THREE.LineSegments | null = null
-let brushSphereMat: THREE.LineBasicMaterial | null = null
-let brushInnerSphereMat: THREE.LineBasicMaterial | null = null
+let brushSphere: THREE.Mesh | null = null
+let brushInnerSphere: THREE.Mesh | null = null
+let brushSphereMat: THREE.MeshBasicMaterial | null = null
+let brushInnerSphereMat: THREE.MeshBasicMaterial | null = null
+let brushIntersect: THREE.Line | null = null
+let brushIntersectMat: THREE.LineBasicMaterial | null = null
 let lastHitY = 0
+// Intersection curve scheduling (avoid recomputing on every mousemove)
+let lastHitPos: { x: number; y: number; z: number } | null = null
+let lastCurveTs = 0
+let curveScheduled = false
+let lastCurveState: { x: number; y: number; z: number; r: number } | null = null
 
 // Profiler metrics (lightweight, toggled by props.profilerMode)
 const profilerModeComputed = computed(() => !!props.profilerMode)
@@ -122,6 +130,47 @@ function setDirtyBoundsFromBrush(x: number, z: number, radius: number) {
 
 function createBrushPreviewIfNeeded() {
   if (!scene) return
+  // Intersection-only mode: initialize curve and skip other helpers
+  {
+    const seg = 128
+    if (!brushIntersect) {
+      const g = new THREE.BufferGeometry()
+      const pos = new Float32Array((seg + 1) * 3)
+      g.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+      brushIntersectMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9, depthTest: true, depthWrite: false })
+      brushIntersect = new THREE.Line(g, brushIntersectMat)
+      brushIntersect.renderOrder = 1002
+      brushIntersect.visible = false
+      scene.add(brushIntersect)
+    }
+    if (!brushRing) {
+      const segRing = 64
+      const pts: THREE.Vector3[] = []
+      for (let i = 0; i < segRing; i++) {
+        const a = (i / segRing) * Math.PI * 2
+        pts.push(new THREE.Vector3(Math.cos(a), 0, Math.sin(a)))
+      }
+      const gRing = new THREE.BufferGeometry().setFromPoints(pts)
+      // Oriented via quaternion each update to match local ground tangent plane
+      brushRing = new THREE.LineLoop(
+        gRing,
+        new THREE.LineBasicMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.6,
+          depthTest: true,
+          depthWrite: false,
+          polygonOffset: true,
+          polygonOffsetFactor: 1,
+          polygonOffsetUnits: 1
+        })
+      )
+      brushRing.renderOrder = 1003
+      brushRing.visible = false
+      scene.add(brushRing)
+    }
+    return
+  }
   if (!brushCircle) {
     const geo = new THREE.CircleGeometry(1, 64)
     geo.rotateX(-Math.PI / 2)
@@ -165,31 +214,78 @@ function createBrushPreviewIfNeeded() {
   // 3D wireframe spheres (match perspective view)
   if (!brushSphere) {
     const sGeo = new THREE.SphereGeometry(1, 16, 12)
-    const wGeo = new THREE.WireframeGeometry(sGeo)
-    brushSphereMat = new THREE.LineBasicMaterial({ color: 0x33aaff, transparent: true, opacity: 0.3, depthWrite: false, depthTest: false })
-    brushSphere = new THREE.LineSegments(wGeo, brushSphereMat)
-    brushSphere.renderOrder = 12
+    brushSphereMat = new THREE.MeshBasicMaterial({
+      color: 0x33aaff,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.3,
+      blending: THREE.CustomBlending,
+      blendSrc: THREE.SrcAlphaFactor,
+      blendDst: THREE.OneMinusSrcAlphaFactor,
+      blendEquation: THREE.AddEquation,
+      depthWrite: false,
+      depthTest: true,
+    })
+    brushSphere = new THREE.Mesh(sGeo, brushSphereMat)
+    brushSphere.renderOrder = 1000
     brushSphere.visible = false
     scene.add(brushSphere)
+    try {
+      ;(window as any).barEditor = (window as any).barEditor || {}
+      const dbgPrev = (window as any).barEditor.brushPreview || {}
+      ;(window as any).barEditor.brushPreview = { ...dbgPrev, ortho: { ...(dbgPrev.ortho || {}), sphereMat: brushSphereMat } }
+      ;(window as any).barEditor.brushPreview.setOpacity = (o: number) => {
+        try {
+          const b = (window as any).barEditor.brushPreview
+          for (const m of [b?.three?.sphereMat, b?.three?.innerMat, b?.ortho?.sphereMat, b?.ortho?.innerMat]) {
+            if (m) { m.transparent = true; m.opacity = o; m.needsUpdate = true }
+          }
+        } catch {}
+      }
+    } catch {}
   }
   if (!brushInnerSphere) {
     const sGeo2 = new THREE.SphereGeometry(1, 12, 8)
-    const wGeo2 = new THREE.WireframeGeometry(sGeo2)
-    brushInnerSphereMat = new THREE.LineBasicMaterial({ color: 0xff5555, transparent: true, opacity: 0.3, depthWrite: false, depthTest: false })
-    brushInnerSphere = new THREE.LineSegments(wGeo2, brushInnerSphereMat)
-    brushInnerSphere.renderOrder = 13
+    brushInnerSphereMat = new THREE.MeshBasicMaterial({
+      color: 0xff5555,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.3,
+      blending: THREE.CustomBlending,
+      blendSrc: THREE.SrcAlphaFactor,
+      blendDst: THREE.OneMinusSrcAlphaFactor,
+      blendEquation: THREE.AddEquation,
+      depthWrite: false,
+      depthTest: true,
+    })
+    brushInnerSphere = new THREE.Mesh(sGeo2, brushInnerSphereMat)
+    brushInnerSphere.renderOrder = 1001
     brushInnerSphere.visible = false
     scene.add(brushInnerSphere)
+    try {
+      ;(window as any).barEditor = (window as any).barEditor || {}
+      const prev = (window as any).barEditor.brushPreview || {}
+      ;(window as any).barEditor.brushPreview = { ...prev, ortho: { ...(prev.ortho || {}), innerMat: brushInnerSphereMat } }
+      ;(window as any).barEditor.brushPreview.setOpacity = (o: number) => {
+        try {
+          const b = (window as any).barEditor.brushPreview
+          for (const m of [b?.three?.sphereMat, b?.three?.innerMat, b?.ortho?.sphereMat, b?.ortho?.innerMat]) {
+            if (m) { m.transparent = true; m.opacity = o; m.needsUpdate = true }
+          }
+        } catch {}
+      }
+    } catch {}
   }
 }
 
 function setBrushPreviewVisible(v: boolean) {
-  // Prefer 3D wireframe spheres in ortho as well
+  // Show only the intersection curve; hide legacy and full spheres
   if (brushCircle) brushCircle.visible = false
-  if (hitDot) hitDot.visible = v
-  if (brushRing) brushRing.visible = false
-  if (brushSphere) brushSphere.visible = v
-  if (brushInnerSphere) brushInnerSphere.visible = v
+  if (hitDot) hitDot.visible = false
+  if (brushRing) brushRing.visible = v
+  if (brushSphere) brushSphere.visible = false
+  if (brushInnerSphere) brushInnerSphere.visible = false
+  if (brushIntersect) brushIntersect.visible = v
 }
 
 function updateBrushPreview(x: number, y: number, z: number) {
@@ -210,7 +306,44 @@ function updateBrushPreview(x: number, y: number, z: number) {
     // Hide legacy ring; sphere preview supersedes it
     brushRing.visible = false
   }
-  // Wireframe spheres for full 3D footprint visualization
+  // Intersection-only preview: create/update curve and return
+  if (!brushIntersect && scene) {
+    const seg = 128
+    const g = new THREE.BufferGeometry()
+    const arr = new Float32Array((seg + 1) * 3)
+    g.setAttribute('position', new THREE.BufferAttribute(arr, 3))
+    brushIntersectMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9, depthTest: true, depthWrite: false })
+    brushIntersect = new THREE.Line(g, brushIntersectMat)
+    brushIntersect.renderOrder = 1002
+    brushIntersect.visible = false
+    scene.add(brushIntersect)
+  }
+  if (brushSphere) brushSphere.visible = false
+  if (brushInnerSphere) brushInnerSphere.visible = false
+  if (brushRing) {
+    // Orient ring to local ground tangent plane using sampled normal
+    const eps = Math.max(0.5, r * 0.02)
+    const hL = sampleHeightAt(x - eps, z)
+    const hR = sampleHeightAt(x + eps, z)
+    const hD = sampleHeightAt(x, z - eps)
+    const hU = sampleHeightAt(x, z + eps)
+    const dhdx = (hR - hL) / (2 * eps)
+    const dhdz = (hU - hD) / (2 * eps)
+    const n = new THREE.Vector3(-dhdx, 1, -dhdz).normalize() // heightfield normal
+    // Base ring geometry lies in XZ (normal +Y). Rotate +Y -> n.
+    const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), n)
+    brushRing.quaternion.copy(q)
+    // Place ring at the hit point and lift slightly along normal to avoid z-fighting
+    brushRing.position.set(x, y, z)
+    brushRing.position.addScaledVector(n, 0.001)
+    brushRing.scale.set(r, r, r)
+    brushRing.visible = !!props.editEnabled && !!props.editPreview
+  }
+  scheduleUpdateIntersect(x, y, z, r)
+  if (brushIntersect) brushIntersect.visible = !!props.editEnabled && !!props.editPreview
+  lastHitPos = { x, y, z }
+  return
+  // Wireframe spheres for full 3D footprint visualization (disabled; using intersection curve)
   if (brushSphere) {
     brushSphere.position.set(x, y, z)
     brushSphere.scale.set(r, r, r)
@@ -222,6 +355,8 @@ function updateBrushPreview(x: number, y: number, z: number) {
       color.setHSL(0.6 * (1 - sNorm), 1, 0.5)
       brushSphereMat.color.copy(color)
       brushSphereMat.opacity = 0.3
+      brushSphereMat.transparent = true
+      brushSphereMat.needsUpdate = true
     }
   }
   if (brushInnerSphere) {
@@ -236,6 +371,8 @@ function updateBrushPreview(x: number, y: number, z: number) {
       color.setHSL(0.0 + 0.6 * sNorm, 1, 0.5)
       brushInnerSphereMat.color.copy(color)
       brushInnerSphereMat.opacity = 0.3
+      brushInnerSphereMat.transparent = true
+      brushInnerSphereMat.needsUpdate = true
     }
   }
 }
@@ -259,6 +396,110 @@ function getBrushCenter(ev: PointerEvent): { x: number; y: number; z: number } |
   return { x: p.x, y: p.y, z: p.z }
 }
 
+// Bilinear sample of heightmap at world x,z
+function sampleHeightAt(xw: number, zw: number): number {
+  const gw = Math.max(2, (props as any).gridW as number)
+  const gl = Math.max(2, (props as any).gridL as number)
+  const W = (props as any).widthWorld as number
+  const L = (props as any).lengthWorld as number
+  const H = (props as any).heights as Float32Array
+  if (!H || gw < 2 || gl < 2) return 0
+  const halfW = W * 0.5
+  const halfL = L * 0.5
+  const u = ((xw + halfW) / Math.max(1e-6, W)) * (gw - 1)
+  const v = ((zw + halfL) / Math.max(1e-6, L)) * (gl - 1)
+  const x0 = Math.floor(u), z0 = Math.floor(v)
+  const x1 = Math.min(gw - 1, x0 + 1), z1 = Math.min(gl - 1, z0 + 1)
+  const tx = Math.max(0, Math.min(1, u - x0))
+  const tz = Math.max(0, Math.min(1, v - z0))
+  const i00 = z0 * gw + x0
+  const i10 = z0 * gw + x1
+  const i01 = z1 * gw + x0
+  const i11 = z1 * gw + x1
+  const h00 = H[i00] ?? 0
+  const h10 = H[i10] ?? 0
+  const h01 = H[i01] ?? 0
+  const h11 = H[i11] ?? 0
+  const hx0 = h00 * (1 - tx) + h10 * tx
+  const hx1 = h01 * (1 - tx) + h11 * tx
+  return hx0 * (1 - tz) + hx1 * tz
+}
+
+// Build/update intersection curve between sphere and terrain
+function updateIntersectLine(cx: number, cy: number, cz: number, r: number) {
+  if (!brushIntersect) return
+  const geo = brushIntersect.geometry as THREE.BufferGeometry
+  const seg = 48
+  let pos = geo.getAttribute('position') as THREE.BufferAttribute | null
+  if (!pos || pos.count !== (seg + 1)) {
+    const arr = new Float32Array((seg + 1) * 3)
+    geo.setAttribute('position', new THREE.BufferAttribute(arr, 3))
+    pos = geo.getAttribute('position') as THREE.BufferAttribute
+  }
+  const arr = (pos!.array as Float32Array)
+  for (let i = 0; i <= seg; i++) {
+    const theta = (i / seg) * Math.PI * 2
+    const ux = Math.cos(theta), uz = Math.sin(theta)
+    // Search along ray for best match between terrain height and sphere surface
+    let bestT = 0
+    let bestErr = Infinity
+    const steps = 8
+    for (let s = 0; s <= steps; s++) {
+      const t = (s / steps) * r
+      const x = cx + ux * t
+      const z = cz + uz * t
+      const h = sampleHeightAt(x, z)
+      const inside = r * r - t * t
+      if (inside < 0) continue
+      const yPlus = cy + Math.sqrt(inside)
+      const yMinus = cy - Math.sqrt(inside)
+      const errPlus = Math.abs(h - yPlus)
+      const errMinus = Math.abs(h - yMinus)
+      const err = Math.min(errPlus, errMinus)
+      if (err < bestErr) {
+        bestErr = err
+        bestT = t
+      }
+    }
+    const x = cx + ux * bestT
+    const z = cz + uz * bestT
+    const y = sampleHeightAt(x, z) + 0.02 // slight lift to avoid z-fighting
+    arr[i * 3 + 0] = x
+    arr[i * 3 + 1] = y
+    arr[i * 3 + 2] = z
+  }
+  pos!.needsUpdate = true
+  if (brushIntersectMat) { brushIntersectMat.opacity = 0.9; brushIntersectMat.needsUpdate = true }
+}
+
+// Throttled update: recompute curve at most ~30fps and only on meaningful changes
+function scheduleUpdateIntersect(cx: number, cy: number, cz: number, r: number) {
+  lastCurveState = { x: cx, y: cy, z: cz, r }
+  if (curveScheduled) return
+  curveScheduled = true
+  requestAnimationFrame(() => {
+    curveScheduled = false
+    const now = performance.now()
+    // 30 fps cap for curve recompute
+    if (now - lastCurveTs < 33) return
+    const prev = lastCurveState
+    if (!prev) return
+    // Skip if movement/radius change is tiny
+    const moveThresh = Math.max(0.5, r * 0.01)
+    if (lastHitPos) {
+      const dx = prev.x - lastHitPos.x
+      const dz = prev.z - lastHitPos.z
+      const dr = Math.abs(prev.r - (Number(props.editRadius ?? 64)))
+      if (dx * dx + dz * dz < moveThresh * moveThresh && dr < 1) {
+        lastCurveTs = now
+        return
+      }
+    }
+    updateIntersectLine(prev.x, prev.y, prev.z, prev.r)
+    lastCurveTs = now
+  })
+}
+
 function applyBrushAt(x: number, z: number) {
   if (!props.heights) return
   const mode = String(props.editMode ?? 'add')
@@ -277,6 +518,7 @@ function applyBrushAt(x: number, z: number) {
     radiusWorld: radius,
     strength,
     hitY: lastHitY,
+    params: (props as any).editParams,
     mode
   })
   profBrushMs.value = performance.now() - tBrush0
@@ -929,7 +1171,8 @@ function init() {
     camera.lookAt(new THREE.Vector3(cx, 0, cz))
   }
 
-  renderer = new THREE.WebGLRenderer({ antialias: true })
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, premultipliedAlpha: false })
+  renderer.sortObjects = true
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.setSize(w, h)
   container.value.appendChild(renderer.domElement)
@@ -1057,6 +1300,13 @@ onBeforeUnmount(() => {
     mesh.geometry.dispose()
     ;(mesh.material as THREE.Material).dispose()
     mesh = null
+  }
+  if (scene && brushIntersect) {
+    try { scene.remove(brushIntersect) } catch {}
+    try { (brushIntersect.geometry as any)?.dispose?.() } catch {}
+    try { (brushIntersect.material as any)?.dispose?.() } catch {}
+    brushIntersect = null
+    brushIntersectMat = null
   }
   scene = null
   camera = null
@@ -1210,15 +1460,7 @@ watch(
   () => props.editRadius,
   () => {
     const r = Number(props.editRadius ?? 64)
-    if (brushCircle) brushCircle.scale.set(r, r, 1)
-    if (brushRing) brushRing.scale.set(r, r, r)
-    if (brushSphere) brushSphere.scale.set(r, r, r)
-    if (brushInnerSphere) {
-      const strength = Number(props.editStrength ?? 0)
-      const sNorm = Math.max(0, Math.min(1, strength / 5))
-      const innerR = Math.max(0.05, r * sNorm)
-      brushInnerSphere.scale.set(innerR, innerR, innerR)
-    }
+    if (lastHitPos) scheduleUpdateIntersect(lastHitPos.x, lastHitPos.y, lastHitPos.z, r)
   }
 )
 
@@ -1226,24 +1468,7 @@ watch(
   () => props.editStrength,
   () => {
     const r = Number(props.editRadius ?? 64)
-    const strength = Number(props.editStrength ?? 0)
-    const sNorm = Math.max(0, Math.min(1, strength / 5))
-    if (brushSphereMat) {
-      const color = new THREE.Color()
-      color.setHSL(0.6 * (1 - sNorm), 1, 0.5)
-      brushSphereMat.color.copy(color)
-      brushSphereMat.opacity = 0.3
-    }
-    if (brushInnerSphere) {
-      const innerR = Math.max(0.05, r * sNorm)
-      brushInnerSphere.scale.set(innerR, innerR, innerR)
-      if (brushInnerSphereMat) {
-        const color = new THREE.Color()
-        color.setHSL(0.0 + 0.6 * sNorm, 1, 0.5)
-        brushInnerSphereMat.color.copy(color)
-        brushInnerSphereMat.opacity = 0.3
-      }
-    }
+    if (lastHitPos) scheduleUpdateIntersect(lastHitPos.x, lastHitPos.y, lastHitPos.z, r)
   }
 )
 
