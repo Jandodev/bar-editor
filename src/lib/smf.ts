@@ -41,6 +41,15 @@ export interface SMFHeader {
   numExtraHeaders: number;
 }
 
+export interface SMFFeature {
+  type: number;
+  x: number;
+  y: number;
+  z: number;
+  rotation: number;
+  relativeSize: number;
+}
+
 export interface SMFParsed {
   header: SMFHeader;
   // Raw height data from file (uint16)
@@ -52,6 +61,28 @@ export interface SMFParsed {
   metalU8?: Uint8Array;
   metalWidth?: number;
   metalLength?: number;
+
+  // Optional type map (width/2 x length/2), values 0..255
+  typeU8?: Uint8Array;
+  typeWidth?: number;
+  typeLength?: number;
+
+  // Optional minimap raw DXT1+MM bytes (1024x1024, with mipmaps, total 699048 bytes)
+  miniMapBytes?: Uint8Array;
+
+  // Optional features
+  featureTypes?: string[];
+  features?: SMFFeature[];
+
+  // Optional grass map (width/4 x length/4), values 0..255
+  grassU8?: Uint8Array;
+  grassWidth?: number;
+  grassLength?: number;
+
+  // Optional tile index (width/4 x length/4), int32 indices into SMT tiles
+  tileIndex?: Int32Array;
+  tileIndexWidth?: number;
+  tileIndexLength?: number;
 }
 
 /** Reads a null-terminated C string from a fixed-length byte array. */
@@ -178,7 +209,141 @@ export function parseSMF(buffer: ArrayBuffer): SMFParsed {
     metalU8 = new Uint8Array(buffer, ofsMetalMap, metalCount);
   }
 
-  return { header, heightU16, heightFloat, metalU8, metalWidth, metalLength };
+  // Optional: Type map reading
+  let typeU8: Uint8Array | undefined;
+  let typeWidth: number | undefined;
+  let typeLength: number | undefined;
+  if (ofsTypeMap > 0) {
+    typeWidth = Math.floor(width / 2);
+    typeLength = Math.floor(length / 2);
+    const typeCount = typeWidth * typeLength;
+    const typeBytes = typeCount; // uint8 per entry
+    expectRange("typemap", ofsTypeMap, typeBytes, total);
+    typeU8 = new Uint8Array(buffer, ofsTypeMap, typeCount);
+  }
+
+  // Optional: Mini map (raw DXT1 with mipmaps, 1024x1024, fixed size 699048 bytes)
+  let miniMapBytes: Uint8Array | undefined;
+  if (ofsMiniMap > 0) {
+    const MINI_SIZE = 699048;
+    expectRange("minimap", ofsMiniMap, MINI_SIZE, total);
+    miniMapBytes = new Uint8Array(buffer, ofsMiniMap, MINI_SIZE);
+  }
+
+  // Optional: Tile index array (int32 per 4x4-squares block)
+  let tileIndex: Int32Array | undefined;
+  let tileIndexWidth: number | undefined;
+  let tileIndexLength: number | undefined;
+  if (ofsTileIndex > 0) {
+    tileIndexWidth = Math.floor(width / 4);
+    tileIndexLength = Math.floor(length / 4);
+    const tiCount = tileIndexWidth * tileIndexLength;
+    const tiBytes = tiCount * 4;
+    expectRange("tileIndex", ofsTileIndex, tiBytes, total);
+    if ((ofsTileIndex % 4) === 0) {
+      tileIndex = new Int32Array(buffer, ofsTileIndex, tiCount);
+    } else {
+      // Unaligned: copy
+      const tmp = u8.subarray(ofsTileIndex, ofsTileIndex + tiBytes);
+      const copy = new Uint8Array(tiBytes);
+      copy.set(tmp);
+      tileIndex = new Int32Array(copy.buffer);
+    }
+  }
+
+  // Optional: parse extra headers to discover grass offset (header type 1)
+  let grassOffset = 0;
+  try {
+    let extraOff = off;
+    for (let i = 0; i < numExtraHeaders; i++) {
+      const extSize = dv.getInt32(extraOff, le);
+      const extType = dv.getInt32(extraOff + 4, le);
+      if (extType === 1) {
+        // Grass extra header
+        grassOffset = dv.getInt32(extraOff + 8, le);
+      }
+      // defensive: avoid infinite loop on bad size
+      extraOff += Math.max(8, extSize);
+    }
+  } catch {}
+
+  // Optional: Grass map reading
+  let grassU8: Uint8Array | undefined;
+  let grassWidth: number | undefined;
+  let grassLength: number | undefined;
+  if (grassOffset > 0) {
+    grassWidth = Math.floor(width / 4);
+    grassLength = Math.floor(length / 4);
+    const grassCount = grassWidth * grassLength;
+    expectRange("grassmap", grassOffset, grassCount, total);
+    grassU8 = new Uint8Array(buffer, grassOffset, grassCount);
+  }
+
+  // Optional: Features
+  let featureTypes: string[] | undefined;
+  let features: SMFFeature[] | undefined;
+  if (ofsFeatures > 0) {
+    expectRange("features header", ofsFeatures, 8, total);
+    const fNumFeatures = dv.getInt32(ofsFeatures + 0, le);
+    const fNumTypes = dv.getInt32(ofsFeatures + 4, le);
+
+    // read fNumTypes null-terminated strings
+    featureTypes = [];
+    let p = ofsFeatures + 8;
+    try {
+      for (let i = 0; i < fNumTypes; i++) {
+        let end = p;
+        while (end < total && u8[end] !== 0) end++;
+        const name = cStringFromBytes(u8.subarray(p, end));
+        featureTypes.push(name);
+        p = end + 1; // skip null
+      }
+    } catch {
+      // ignore malformed names section
+    }
+
+    // read features (robust to truncated data)
+    features = [];
+    const entrySize = 4 + 4 * 5; // int + 5 floats
+    const bytesAvail = Math.max(0, total - p);
+    const maxFeatures = Math.floor(bytesAvail / entrySize);
+    const hdrCount = Math.max(0, fNumFeatures);
+    const readCount = Math.max(0, Math.min(hdrCount, maxFeatures));
+    if (readCount < hdrCount) {
+      console.warn(`SMF: features truncated or malformed (header=${hdrCount}, canRead=${readCount}, availBytes=${bytesAvail})`);
+    }
+    for (let i = 0; i < readCount; i++) {
+      const base = p + i * entrySize;
+      const type = dv.getInt32(base + 0, le);
+      const x = dv.getFloat32(base + 4, le);
+      const y = dv.getFloat32(base + 8, le);
+      const z = dv.getFloat32(base + 12, le);
+      const rotation = dv.getFloat32(base + 16, le);
+      const relativeSize = dv.getFloat32(base + 20, le);
+      features.push({ type, x, y, z, rotation, relativeSize });
+    }
+  }
+
+  return {
+    header,
+    heightU16,
+    heightFloat,
+    metalU8,
+    metalWidth,
+    metalLength,
+    typeU8,
+    typeWidth,
+    typeLength,
+    miniMapBytes,
+    featureTypes,
+    features,
+    grassU8,
+    grassWidth,
+    grassLength,
+    tileIndex,
+    tileIndexWidth,
+    tileIndexLength,
+  };
 }
 
 /** Compute world extents in map units */

@@ -22,6 +22,33 @@ const state = reactive({
   metalW: 0,
   metalL: 0,
 
+  // Type map
+  showType: false,
+  typeU8: undefined as Uint8Array | undefined,
+  typeW: 0,
+  typeL: 0,
+
+  // Grass map
+  showGrass: false,
+  grassU8: undefined as Uint8Array | undefined,
+  grassW: 0,
+  grassL: 0,
+
+  // Tiles (tile index false-color overlay)
+  showTiles: false,
+  tileIndex: undefined as Int32Array | undefined,
+  tileIndexW: 0,
+  tileIndexL: 0,
+
+  // Features
+  showFeatures: false,
+  featureTypes: undefined as string[] | undefined,
+  features: undefined as any[] | undefined,
+
+  // Minimap (raw bytes, WIP)
+  showMiniMap: false,
+  miniMapBytes: undefined as Uint8Array | undefined,
+
   baseColorUrl: null as string | null,
   baseColorIsDDS: false,
 
@@ -70,6 +97,38 @@ onMounted(() => {
     state.metalW = Number(v.metalW ?? 0)
     state.metalL = Number(v.metalL ?? 0)
   }
+  const updateType = (v: any) => {
+    v = v || {}
+    state.showType = !!v.showType
+    state.typeU8 = v.typeU8 as Uint8Array | undefined
+    state.typeW = Number(v.typeW ?? 0)
+    state.typeL = Number(v.typeL ?? 0)
+  }
+  const updateGrass = (v: any) => {
+    v = v || {}
+    state.showGrass = !!v.showGrass
+    state.grassU8 = v.grassU8 as Uint8Array | undefined
+    state.grassW = Number(v.grassW ?? 0)
+    state.grassL = Number(v.grassL ?? 0)
+  }
+  const updateTiles = (v: any) => {
+    v = v || {}
+    state.showTiles = !!v.showTiles
+    state.tileIndex = (v.tileIndex as Int32Array) || undefined
+    state.tileIndexW = Number(v.tileIndexW ?? 0)
+    state.tileIndexL = Number(v.tileIndexL ?? 0)
+  }
+  const updateFeatures = (v: any) => {
+    v = v || {}
+    state.showFeatures = !!v.showFeatures
+    state.featureTypes = Array.isArray(v.featureTypes) ? v.featureTypes : undefined
+    state.features = Array.isArray(v.features) ? v.features : undefined
+  }
+  const updateMinimap = (v: any) => {
+    v = v || {}
+    state.showMiniMap = !!v.showMiniMap
+    state.miniMapBytes = (v.miniMapBytes as Uint8Array) || undefined
+  }
   const updateBase = (v: any) => {
     v = v || {}
     state.baseColorUrl = (v.url ?? null) as string | null
@@ -115,6 +174,11 @@ onMounted(() => {
   // initial snapshot
   const t = bus.get('terrain'); if (t) updateTerrain(t as any)
   updateMetal(bus.get('metal'))
+  updateType(bus.get('type'))
+  updateGrass(bus.get('grass'))
+  updateTiles(bus.get('tiles'))
+  updateFeatures(bus.get('features'))
+  updateMinimap(bus.get('minimap'))
   updateBase(bus.get('baseTexture'))
   updateDisp(bus.get('display'))
   updateOverlays(bus.get('overlays'))
@@ -128,6 +192,11 @@ onMounted(() => {
   unsubs = [
     bus.subscribe('terrain', updateTerrain as any),
     bus.subscribe('metal', updateMetal as any),
+    bus.subscribe('type', updateType as any),
+    bus.subscribe('grass', updateGrass as any),
+    bus.subscribe('tiles', updateTiles as any),
+    bus.subscribe('features', updateFeatures as any),
+    bus.subscribe('minimap', updateMinimap as any),
     bus.subscribe('baseTexture', updateBase as any),
     bus.subscribe('display', updateDisp as any),
     bus.subscribe('overlays', updateOverlays as any),
@@ -201,6 +270,21 @@ function onEditCursor(pos: { x: number; y: number; z: number }) {
     :metalU8="state.metalU8"
     :metalW="state.metalW"
     :metalL="state.metalL"
+    :showType="state.showType"
+    :typeU8="state.typeU8"
+    :typeW="state.typeW"
+    :typeL="state.typeL"
+    :showGrass="state.showGrass"
+    :grassU8="state.grassU8"
+    :grassW="state.grassW"
+    :grassL="state.grassL"
+    :showTiles="state.showTiles"
+    :tileIndex="(state.tileIndex as any)"
+    :tileIndexW="state.tileIndexW"
+    :tileIndexL="state.tileIndexL"
+    :showFeatures="state.showFeatures"
+    :featureTypes="(state.featureTypes as any)"
+    :features="(state.features as any)"
     :baseColorUrl="state.baseColorUrl"
     :baseColorIsDDS="state.baseColorIsDDS"
     :wireframe="state.wireframe"
@@ -209,6 +293,8 @@ function onEditCursor(pos: { x: number; y: number; z: number }) {
     :env="state.env"
     :previewPos="(state.previewPos as any)"
     :editParams="(state.editParams as any)"
+    :showMiniMap="state.showMiniMap"
+    :miniMapBytes="state.miniMapBytes"
     v-bind="mode === 'orthographic' ? { screenRotationQuarter: state.screenRotationQuarter, atlasMode: state.atlasMode, atlasImages: state.images, profilerMode: state.profilerMode } : {}"
     :editEnabled="state.editEnabled"
     :editMode="state.editMode"

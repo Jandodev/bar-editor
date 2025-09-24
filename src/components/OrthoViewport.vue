@@ -27,6 +27,29 @@ type Props = {
   metalW?: number
   metalL?: number
 
+  // Type map overlay (optional)
+  showType?: boolean
+  typeU8?: Uint8Array
+  typeW?: number
+  typeL?: number
+
+  // Grass overlay (optional)
+  showGrass?: boolean
+  grassU8?: Uint8Array
+  grassW?: number
+  grassL?: number
+
+  // Tiles overlay (optional)
+  showTiles?: boolean
+  tileIndex?: Int32Array
+  tileIndexW?: number
+  tileIndexL?: number
+ 
+  // Features (optional)
+  showFeatures?: boolean
+  featureTypes?: string[]
+  features?: { type: number; x: number; y: number; z: number; rotation: number; relativeSize: number }[]
+
   // Texturing + display toggles
   baseColorUrl?: string | null
   baseColorIsDDS?: boolean
@@ -577,10 +600,28 @@ function onPointerUp() {
 let ambientLight: THREE.AmbientLight | null = null
 let dirLight: THREE.DirectionalLight | null = null
 
-// Metal overlay resources
+ // Metal overlay resources
 let metalMesh: THREE.Mesh | null = null
 let metalMat: THREE.MeshBasicMaterial | null = null
 let metalTex: THREE.DataTexture | null = null
+
+// Type map overlay resources
+let typeMesh: THREE.Mesh | null = null
+let typeMat: THREE.MeshBasicMaterial | null = null
+let typeTex: THREE.DataTexture | null = null
+
+ // Grass overlay resources
+let grassMesh: THREE.Mesh | null = null
+let grassMat: THREE.MeshBasicMaterial | null = null
+let grassTex: THREE.DataTexture | null = null
+
+// Tile overlay resources
+let tileMesh: THREE.Mesh | null = null
+let tileMat: THREE.MeshBasicMaterial | null = null
+let tileTex: THREE.DataTexture | null = null
+ 
+// Features
+let featuresGroup: THREE.Group | null = null
 
 // Image overlay resources (from folder)
 type ImgLayer = { mesh: THREE.Mesh, mat: THREE.MeshBasicMaterial, tex: THREE.Texture, name: string }
@@ -736,6 +777,44 @@ function disposeMetal() {
   if (metalTex) {
     metalTex.dispose()
     metalTex = null
+  }
+}
+
+function disposeType() {
+  if (typeMesh && scene) {
+    scene.remove(typeMesh)
+    typeMesh = null
+  }
+  if (typeMat) { typeMat.dispose(); typeMat = null }
+  if (typeTex) { typeTex.dispose(); typeTex = null }
+}
+function disposeGrass() {
+  if (grassMesh && scene) {
+    scene.remove(grassMesh)
+    grassMesh = null
+  }
+  if (grassMat) { grassMat.dispose(); grassMat = null }
+  if (grassTex) { grassTex.dispose(); grassTex = null }
+}
+function disposeTile() {
+  if (tileMesh && scene) {
+    scene.remove(tileMesh)
+    tileMesh = null
+  }
+  if (tileMat) { tileMat.dispose(); tileMat = null }
+  if (tileTex) { tileTex.dispose(); tileTex = null }
+}
+function disposeFeatures() {
+  if (featuresGroup && scene) {
+    try { scene.remove(featuresGroup) } catch {}
+    try {
+      for (const c of featuresGroup.children) {
+        const m = c as THREE.Mesh
+        try { (m.geometry as any)?.dispose?.() } catch {}
+        try { ((m.material as any) as THREE.Material)?.dispose?.() } catch {}
+      }
+    } catch {}
+    featuresGroup = null
   }
 }
 
@@ -972,6 +1051,257 @@ function buildMetalOverlay(geom: THREE.BufferGeometry) {
   scene.add(metalMesh)
 }
 
+function buildTypeOverlay(geom: THREE.BufferGeometry) {
+  disposeType()
+  if (!scene) return
+  if (!props.showType) return
+  if (!props.typeU8 || !props.typeW || !props.typeL) return
+
+  const typeU8 = props.typeU8 as Uint8Array
+  const tw = props.typeW!
+  const tl = props.typeL!
+  const pxCount = tw * tl
+  if (typeU8.length < pxCount) {
+    console.warn('OrthoViewport: typeU8 size does not match expected resolution', {
+      have: typeU8.length,
+      expected: pxCount,
+    })
+    return
+  }
+
+  function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
+    const i = Math.floor(h * 6)
+    const f = h * 6 - i
+    const p = v * (1 - s)
+    const q = v * (1 - f * s)
+    const t = v * (1 - (1 - f) * s)
+    let r = 0, g = 0, b = 0
+    switch (i % 6) {
+      case 0: r = v; g = t; b = p; break
+      case 1: r = q; g = v; b = p; break
+      case 2: r = p; g = v; b = t; break
+      case 3: r = p; g = q; b = v; break
+      case 4: r = t; g = p; b = v; break
+      case 5: r = v; g = p; b = q; break
+    }
+    return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)]
+  }
+
+  const data = new Uint8Array(pxCount * 4)
+  for (let i = 0; i < pxCount; i++) {
+    const t = typeU8[i] ?? 0
+    const [r, g, b] = hsvToRgb(((t * 37) % 256) / 256, 0.85, 1.0)
+    const j = i * 4
+    data[j + 0] = r
+    data[j + 1] = g
+    data[j + 2] = b
+    data[j + 3] = 140
+  }
+
+  typeTex = new THREE.DataTexture(data, tw, tl, THREE.RGBAFormat, THREE.UnsignedByteType)
+  typeTex.colorSpace = THREE.NoColorSpace
+  typeTex.center.set(0.5, 0.5)
+  typeTex.flipY = true
+  typeTex.generateMipmaps = false
+  typeTex.minFilter = THREE.NearestFilter
+  typeTex.magFilter = THREE.NearestFilter
+  typeTex.wrapS = THREE.ClampToEdgeWrapping
+  typeTex.wrapT = THREE.ClampToEdgeWrapping
+  typeTex.needsUpdate = true
+
+  typeMat = new THREE.MeshBasicMaterial({
+    map: typeTex,
+    transparent: true,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -1,
+  })
+
+  typeMesh = new THREE.Mesh(geom, typeMat)
+  typeMesh.renderOrder = 1.2
+  scene.add(typeMesh)
+}
+
+function buildGrassOverlay(geom: THREE.BufferGeometry) {
+  disposeGrass()
+  if (!scene) return
+  if (!props.showGrass) return
+  if (!props.grassU8 || !props.grassW || !props.grassL) return
+ 
+  const grassU8 = props.grassU8 as Uint8Array
+  const gw = props.grassW!
+  const gl = props.grassL!
+  const pxCount = gw * gl
+  if (grassU8.length < pxCount) {
+    console.warn('OrthoViewport: grassU8 size does not match expected resolution', {
+      have: grassU8.length,
+      expected: pxCount,
+    })
+    return
+  }
+ 
+  const data = new Uint8Array(pxCount * 4)
+  for (let i = 0; i < pxCount; i++) {
+    const a = grassU8[i] ?? 0
+    const j = i * 4
+    data[j + 0] = 0
+    data[j + 1] = 255
+    data[j + 2] = 0
+    data[j + 3] = a
+  }
+ 
+  grassTex = new THREE.DataTexture(data, gw, gl, THREE.RGBAFormat, THREE.UnsignedByteType)
+  grassTex.colorSpace = THREE.NoColorSpace
+  grassTex.center.set(0.5, 0.5)
+  grassTex.flipY = true
+  grassTex.generateMipmaps = false
+  grassTex.minFilter = THREE.NearestFilter
+  grassTex.magFilter = THREE.NearestFilter
+  grassTex.wrapS = THREE.ClampToEdgeWrapping
+  grassTex.wrapT = THREE.ClampToEdgeWrapping
+  grassTex.needsUpdate = true
+ 
+  grassMat = new THREE.MeshBasicMaterial({
+    map: grassTex,
+    transparent: true,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -1,
+  })
+ 
+  grassMesh = new THREE.Mesh(geom, grassMat)
+  grassMesh.renderOrder = 1.1
+  scene.add(grassMesh)
+}
+
+function buildTileOverlay(geom: THREE.BufferGeometry) {
+  disposeTile()
+  if (!scene) return
+  if (!props.showTiles) return
+  if (!props.tileIndex || !props.tileIndexW || !props.tileIndexL) return
+
+  const ti = props.tileIndex as Int32Array
+  const tw = props.tileIndexW!
+  const tl = props.tileIndexL!
+  const pxCount = tw * tl
+  if (ti.length < pxCount) {
+    console.warn('OrthoViewport: tileIndex size does not match expected resolution', {
+      have: ti.length,
+      expected: pxCount,
+    })
+    return
+  }
+
+  function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
+    const i = Math.floor(h * 6)
+    const f = h * 6 - i
+    const p = v * (1 - s)
+    const q = v * (1 - f * s)
+    const t = v * (1 - (1 - f) * s)
+    let r = 0, g = 0, b = 0
+    switch (i % 6) {
+      case 0: r = v; g = t; b = p; break
+      case 1: r = q; g = v; b = p; break
+      case 2: r = p; g = v; b = t; break
+      case 3: r = p; g = q; b = v; break
+      case 4: r = t; g = p; b = v; break
+      case 5: r = v; g = p; b = q; break
+    }
+    return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)]
+  }
+
+  const data = new Uint8Array(pxCount * 4)
+  for (let i = 0; i < pxCount; i++) {
+    const idx = Math.abs(ti[i] ?? 0)
+    const hue = ((idx * 97) % 256) / 256
+    const [r, g, b] = hsvToRgb(hue, 0.75, 1.0)
+    const j = i * 4
+    data[j + 0] = r
+    data[j + 1] = g
+    data[j + 2] = b
+    data[j + 3] = 120
+  }
+
+  tileTex = new THREE.DataTexture(data, tw, tl, THREE.RGBAFormat, THREE.UnsignedByteType)
+  tileTex.colorSpace = THREE.NoColorSpace
+  tileTex.center.set(0.5, 0.5)
+  tileTex.flipY = true
+  tileTex.generateMipmaps = false
+  tileTex.minFilter = THREE.NearestFilter
+  tileTex.magFilter = THREE.NearestFilter
+  tileTex.wrapS = THREE.ClampToEdgeWrapping
+  tileTex.wrapT = THREE.ClampToEdgeWrapping
+  tileTex.needsUpdate = true
+
+  tileMat = new THREE.MeshBasicMaterial({
+    map: tileTex,
+    transparent: true,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -1,
+  })
+
+  tileMesh = new THREE.Mesh(geom, tileMat)
+  tileMesh.renderOrder = 1.15
+  scene.add(tileMesh)
+}
+
+function buildFeatures() {
+  disposeFeatures()
+  if (!scene) return
+  if (!props.showFeatures) return
+  const feats = Array.isArray(props.features) ? props.features! : []
+  if (!feats.length) return
+
+  featuresGroup = new THREE.Group()
+  const maxDim = Math.max(props.widthWorld, props.lengthWorld)
+  const baseR = Math.max(0.5, maxDim * 0.005)
+  const geo = new THREE.SphereGeometry(baseR, 10, 8)
+  const matCache = new Map<number, THREE.MeshBasicMaterial>()
+
+  function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
+    const i = Math.floor(h * 6)
+    const f = h * 6 - i
+    const p = v * (1 - s)
+    const q = v * (1 - f * s)
+    const t = v * (1 - (1 - f) * s)
+    let r = 0, g = 0, b = 0
+    switch (i % 6) {
+      case 0: r = v; g = t; b = p; break
+      case 1: r = q; g = v; b = p; break
+      case 2: r = p; g = v; b = t; break
+      case 3: r = p; g = q; b = v; break
+      case 4: r = t; g = p; b = v; break
+      case 5: r = v; g = p; b = q; break
+    }
+    return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)]
+  }
+
+  for (const f of feats) {
+    const t = Number((f as any).type ?? 0)
+    let mat = matCache.get(t)
+    if (!mat) {
+      const [r, g, b] = hsvToRgb(((t * 53) % 256) / 256, 0.8, 1.0)
+      mat = new THREE.MeshBasicMaterial({
+        color: new THREE.Color(r / 255, g / 255, b / 255),
+        depthWrite: false,
+      })
+      matCache.set(t, mat)
+    }
+    const m = new THREE.Mesh(geo, mat)
+    const xw = Number((f as any).x ?? 0) - props.widthWorld * 0.5
+    const zw = Number((f as any).z ?? 0) - props.lengthWorld * 0.5
+    const yw = sampleHeightAt(xw, zw) + baseR * 0.6
+    m.position.set(xw, yw, zw)
+    featuresGroup.add(m)
+  }
+
+  scene.add(featuresGroup)
+}
+
 function buildImageOverlays(geom: THREE.BufferGeometry) {
   disposeImgLayers()
   if (!scene || !props.overlays) return
@@ -1113,7 +1443,11 @@ function buildMesh() {
   scene.add(mesh)
 
   buildMetalOverlay(geom)
+  buildTypeOverlay(geom)
+  buildGrassOverlay(geom)
+  buildTileOverlay(geom)
   buildImageOverlays(geom)
+  buildFeatures()
 
   const size = Math.max(widthWorld, lengthWorld)
   grid = new THREE.GridHelper(size, 20, 0x222222, 0x444444)
@@ -1278,8 +1612,12 @@ onBeforeUnmount(() => {
     controls = null
   }
   disposeMetal()
+  disposeType()
+  disposeGrass()
   disposeImgLayers()
   disposeBaseTex()
+  disposeFeatures()
+  disposeTile()
 
   if (scene && ambientLight) {
     scene.remove(ambientLight)
@@ -1368,7 +1706,7 @@ watch(
   { deep: false }
 )
 
-// Update metal overlay when metal data or visibility changes
+ // Update metal overlay when metal data or visibility changes
 watch(
   () => [props.showMetal, props.metalU8, props.metalW, props.metalL],
   () => {
@@ -1376,6 +1714,45 @@ watch(
     buildMetalOverlay(mesh.geometry)
   },
   { deep: false }
+)
+
+// Update type overlay
+watch(
+  () => [props.showType, props.typeU8, props.typeW, props.typeL],
+  () => {
+    if (!mesh) return
+    buildTypeOverlay(mesh.geometry)
+  },
+  { deep: false }
+)
+
+ // Update grass overlay
+watch(
+  () => [props.showGrass, props.grassU8, props.grassW, props.grassL],
+  () => {
+    if (!mesh) return
+    buildGrassOverlay(mesh.geometry)
+  },
+  { deep: false }
+)
+
+// Update tile overlay
+watch(
+  () => [props.showTiles, props.tileIndex, props.tileIndexW, props.tileIndexL],
+  () => {
+    if (!mesh) return
+    buildTileOverlay(mesh.geometry)
+  },
+  { deep: false }
+)
+
+// Update features markers
+watch(
+  () => [props.showFeatures, props.features],
+  () => {
+    buildFeatures()
+  },
+  { deep: true }
 )
 
 // Update image overlays when overlays array changes

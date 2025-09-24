@@ -32,6 +32,11 @@ const gridL = ref(0)
 const strideUsed = ref(1)
 
 const showMetal = ref(false)
+const showType = ref(false)
+const showTiles = ref(false)
+const showGrass = ref(false)
+const showFeatures = ref(false)
+const showMiniMap = ref(false)
 const wireframe = ref(false)
 const showGrid = ref(true)
 const fps = ref<number | null>(null)
@@ -615,6 +620,58 @@ watch([showMetal, smf], () => {
     metalU8: m?.metalU8,
     metalW: m?.metalWidth,
     metalL: m?.metalLength,
+  } as any)
+}, { immediate: true })
+
+// Type map overlay
+watch([showType, smf], () => {
+  const m = smf.value
+  bus.set('type', {
+    showType: !!showType.value,
+    typeU8: m?.typeU8,
+    typeW: m?.typeWidth,
+    typeL: m?.typeLength,
+  } as any)
+}, { immediate: true })
+
+/** Tile index overlay */
+watch([showTiles, smf], () => {
+  const m = smf.value
+  bus.set('tiles', {
+    showTiles: !!showTiles.value,
+    tileIndex: m?.tileIndex,
+    tileIndexW: m?.tileIndexWidth,
+    tileIndexL: m?.tileIndexLength,
+  } as any)
+}, { immediate: true })
+
+// Grass map overlay
+watch([showGrass, smf], () => {
+  const m = smf.value
+  bus.set('grass', {
+    showGrass: !!showGrass.value,
+    grassU8: m?.grassU8,
+    grassW: m?.grassWidth,
+    grassL: m?.grassLength,
+  } as any)
+}, { immediate: true })
+
+// Features overlay
+watch([showFeatures, smf], () => {
+  const m = smf.value
+  bus.set('features', {
+    showFeatures: !!showFeatures.value,
+    featureTypes: m?.featureTypes,
+    features: m?.features,
+  } as any)
+}, { immediate: true })
+
+// Minimap payload (note: raw DXT1+MM; decoding not implemented yet in viewport)
+watch([showMiniMap, smf], () => {
+  const m = smf.value
+  bus.set('minimap', {
+    showMiniMap: !!showMiniMap.value,
+    miniMapBytes: m?.miniMapBytes,
   } as any)
 }, { immediate: true })
 
@@ -1528,6 +1585,26 @@ export default defineComponent({
         <label class="toggle" v-show="!collapseDisplay">
           <input type="checkbox" v-model="showMetal" />
           <span>Metal</span>
+        </label>
+        <label class="toggle" v-show="!collapseDisplay">
+          <input type="checkbox" v-model="showType" />
+          <span>Type Map</span>
+        </label>
+        <label class="toggle" v-show="!collapseDisplay">
+          <input type="checkbox" v-model="showTiles" />
+          <span>Tiles (Index)</span>
+        </label>
+        <label class="toggle" v-show="!collapseDisplay">
+          <input type="checkbox" v-model="showGrass" />
+          <span>Grass</span>
+        </label>
+        <label class="toggle" v-show="!collapseDisplay">
+          <input type="checkbox" v-model="showFeatures" />
+          <span>Features</span>
+        </label>
+        <label class="toggle" v-show="!collapseDisplay" :title="smf?.miniMapBytes ? 'Minimap (raw DXT1 from SMF). Rendering support WIP.' : 'No minimap bytes present in SMF.'">
+          <input type="checkbox" v-model="showMiniMap" :disabled="!smf?.miniMapBytes" />
+          <span>Minimap (SMF)</span>
         </label>
         <label class="toggle" v-show="!collapseDisplay">
           <input type="checkbox" v-model="wireframe" />
