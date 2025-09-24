@@ -2,6 +2,7 @@
 import { onMounted, onBeforeUnmount, reactive, computed } from 'vue'
 import type { ResourceBus } from '../../lib/editor/resource-bus'
 import { brushRegistry } from '../../lib/brushes'
+import { searchAmbientCG, buildAmbientSearchUrl, resolveAmbientByIdToImage, listStamps, listUploadedStamps, type AmbientSearchResult, type StampEntry } from '../../lib/heightmaps'
 
 type Props = {
   bus: ResourceBus
@@ -26,6 +27,21 @@ const state = reactive({
   dragWhat: '' as 'radius' | 'strength' | '',
   dragStartX: 0,
   dragStartValue: 0,
+  // ambientCG search popup
+  searchOpen: false,
+  searching: false,
+  searchResults: [] as AmbientSearchResult[],
+  searchError: null as string | null,
+  searchUrl: '' as string,
+  searchCount: 0,
+  selectingId: null as string | null,
+
+  // Local stamps picker (bar-editor-assets/stamps)
+  stampsOpen: false,
+  stampsLoading: false,
+  stampsError: null as string | null,
+  stampsUploaded: [] as StampEntry[],
+  stampsPublic: [] as StampEntry[],
 })
 
 function publishEdit(partial: Partial<{ enabled: boolean; mode: string; radius: number; strength: number; preview: boolean; params: Record<string, any> }>) {
@@ -168,6 +184,110 @@ function getSelectLabel(def: any): string {
   const curr = (state.params || {})[def.key] ?? def.default
   const found = opts.find((o: any) => o?.value === curr)
   return found?.label ?? String(curr)
+}
+
+// ambientCG search helpers
+function openAmbientSearch() {
+  const q = String((state.params || {})['ambientQuery'] ?? '')
+  state.searchOpen = true
+  state.searching = true
+  state.searchError = null
+  state.searchResults = []
+  state.searchUrl = buildAmbientSearchUrl(q, 24)
+  state.searchCount = 0
+  ;(async () => {
+    try {
+      const results = await searchAmbientCG(q, 24)
+      state.searchResults = results
+      state.searchCount = Array.isArray(results) ? results.length : 0
+    } catch (e: any) {
+      state.searchError = e?.message || String(e)
+    } finally {
+      state.searching = false
+    }
+  })()
+}
+function rerunAmbientSearch() {
+  const q = String((state.params || {})['ambientQuery'] ?? '')
+  state.searching = true
+  state.searchError = null
+  state.searchResults = []
+  state.searchUrl = buildAmbientSearchUrl(q, 24)
+  state.searchCount = 0
+  ;(async () => {
+    try {
+      const results = await searchAmbientCG(q, 24)
+      state.searchResults = results
+      state.searchCount = Array.isArray(results) ? results.length : 0
+    } catch (e: any) {
+      state.searchError = e?.message || String(e)
+    } finally {
+      state.searching = false
+    }
+  })()
+}
+function closeAmbientSearch() {
+  state.searchOpen = false
+}
+
+// Local stamps helpers
+async function openStampsPicker() {
+  state.stampsOpen = true
+  state.stampsLoading = true
+  state.stampsError = null
+  try {
+    const uploaded = listUploadedStamps() // from user-uploaded map folder
+    const builtin = await listStamps()    // from public manifest/index.json (optional)
+    state.stampsUploaded = uploaded
+    state.stampsPublic = builtin
+  } catch (e: any) {
+    state.stampsError = e?.message || String(e)
+  } finally {
+    state.stampsLoading = false
+  }
+}
+async function reloadStamps() {
+  await openStampsPicker()
+}
+function closeStampsPicker() {
+  state.stampsOpen = false
+}
+function useStamp(s: StampEntry) {
+  const path = s.url || s.path
+  if (!path) return
+  const next = { ...(state.params || {}) }
+  if (s.isUploaded) {
+    // Use the original uploaded relative path so the loader resolves into filesState.uploadedFiles
+    next['sourceType'] = 'upload'
+    next['uploadPath'] = s.path
+  } else {
+    // Built-in/public asset
+    next['sourceType'] = 'asset'
+    next['assetId'] = path
+  }
+  publishEdit({ params: next })
+  state.stampsOpen = false
+}
+async function useAmbientResult(r: AmbientSearchResult) {
+  try {
+    state.selectingId = r.id
+    // Resolve by asset id to get a true height/displacement map when possible
+    const direct = await resolveAmbientByIdToImage(r.id)
+    const url = direct || r.heightUrl || r.previewUrl
+    if (url) {
+      const next = { ...(state.params || {}) }
+      next['sourceType'] = 'url'
+      next['url'] = url
+      publishEdit({ params: next })
+      state.searchOpen = false
+    } else {
+      state.searchError = 'No suitable height/displacement image found for this asset.'
+    }
+  } catch (e: any) {
+    state.searchError = e?.message || String(e)
+  } finally {
+    state.selectingId = null
+  }
 }
 
 // Mapping: UI "add/remove" to 'raise'/'lower' mode for runtime
@@ -329,6 +449,33 @@ function endScrub() {
           <span class="hint">{{ def.label }}</span>
           <button class="btn" @click="cycleParamSelect(def)">{{ getSelectLabel(def) }}</button>
         </div>
+        <div v-else-if="def.type === 'text'" class="group small">
+          <span class="hint">{{ def.label }}</span>
+          <input
+            class="input"
+            :placeholder="def.placeholder || ''"
+            :value="(state.params?.[def.key] ?? def.default)"
+            @change="(e: any) => setParam(def.key, (e.target as HTMLInputElement).value)"
+            @keyup.enter="(e: any) => setParam(def.key, (e.target as HTMLInputElement).value)"
+          />
+          <!-- Special-case ambientCG query to expose a Search button -->
+          <button
+            v-if="def.key === 'ambientQuery'"
+            class="btn"
+            title="Search ambientCG"
+            @click="openAmbientSearch"
+          >
+            Search
+          </button>
+          <button
+            v-if="def.key === 'assetId'"
+            class="btn"
+            title="Pick from /bar-editor-assets/stamps"
+            @click="openStampsPicker"
+          >
+            Stamps
+          </button>
+        </div>
       </template>
 
       <!-- Preview toggle -->
@@ -337,14 +484,126 @@ function endScrub() {
         <span>Preview</span>
       </button>
     </div>
+    <!-- AmbientCG Search Modal -->
+    <div v-if="state.searchOpen" class="modal">
+      <div class="modal-backdrop" @click="closeAmbientSearch"></div>
+      <div class="modal-panel">
+        <div class="modal-header">
+          <div class="title">ambientCG Search</div>
+          <button class="btn close" @click="closeAmbientSearch">✕</button>
+        </div>
+        <div class="modal-subheader">
+          <div class="url">
+            <span>Request:</span>
+            <a :href="state.searchUrl" target="_blank" rel="noopener">{{ state.searchUrl }}</a>
+          </div>
+          <div class="meta">
+            <span>Results: {{ state.searchCount }}</span>
+            <button class="btn small" @click="rerunAmbientSearch">Refresh</button>
+      </div>
+    </div>
+
+        <div class="modal-body">
+          <div v-if="state.searching" class="loading">Searching…</div>
+          <div v-else-if="state.searchError" class="error">Error: {{ state.searchError }}</div>
+          <div v-else class="results">
+            <div
+              v-for="r in state.searchResults"
+              :key="r.id + (r.heightUrl || r.previewUrl)"
+              class="result"
+            >
+              <div class="thumb-wrap">
+                <img class="thumb" :src="r.previewUrl" :alt="r.title" />
+              </div>
+              <div class="meta">
+                <div class="name" :title="r.title">{{ r.title }}</div>
+                <button class="btn use" @click="useAmbientResult(r)" :disabled="state.selectingId === r.id">
+                  <span v-if="state.selectingId === r.id">Using…</span>
+                  <span v-else>Use Height</span>
+                </button>
+              </div>
+            </div>
+            <div v-if="!state.searchResults.length" class="empty">No results.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- Local Stamps Picker Modal (moved outside ambientCG v-if so it opens independently) -->
+    <div v-if="state.stampsOpen" class="modal modal-stamps">
+      <div class="modal-backdrop" @click="closeStampsPicker"></div>
+      <div class="modal-panel">
+        <div class="modal-header">
+          <div class="title">Local Stamps (/bar-editor-assets/stamps)</div>
+          <button class="btn close" @click="closeStampsPicker">✕</button>
+        </div>
+        <div class="modal-subheader">
+          <div class="meta">
+            <span>Uploaded: {{ state.stampsUploaded.length }}</span>
+            <span>Built‑in: {{ state.stampsPublic.length }}</span>
+            <button class="btn small" @click="reloadStamps">Refresh</button>
+          </div>
+        </div>
+        <div class="modal-body">
+          <div v-if="state.stampsLoading" class="loading">Loading…</div>
+          <div v-else-if="state.stampsError" class="error">Error: {{ state.stampsError }}</div>
+
+          <template v-else>
+            <div v-if="state.stampsUploaded.length" class="sec">
+              <div class="sec-title">Uploaded Stamps (from map)</div>
+              <div class="results">
+                <div
+                  v-for="s in state.stampsUploaded"
+                  :key="'up:' + (s.id || s.path)"
+                  class="result"
+                >
+                  <div class="thumb-wrap">
+                    <img class="thumb" :src="s.url || s.path" :alt="s.label || s.id || s.path" />
+                  </div>
+                  <div class="meta">
+                    <div class="name" :title="s.label || s.id || s.path">{{ s.label || s.id || s.path.split('/').pop() }}</div>
+                    <button class="btn use" @click="useStamp(s)">Use</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="state.stampsPublic.length" class="sec">
+              <div class="sec-title">Built‑in Stamps</div>
+              <div class="results">
+                <div
+                  v-for="s in state.stampsPublic"
+                  :key="'pub:' + (s.id || s.path)"
+                  class="result"
+                >
+                  <div class="thumb-wrap">
+                    <img class="thumb" :src="s.url || s.path" :alt="s.label || s.id || s.path" />
+                  </div>
+                  <div class="meta">
+                    <div class="name" :title="s.label || s.id || s.path">{{ s.label || s.id || s.path.split('/').pop() }}</div>
+                    <button class="btn use" @click="useStamp(s)">Use</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="!state.stampsUploaded.length && !state.stampsPublic.length" class="empty">
+              No stamps found in the uploaded map (bar-editor-assets/stamps). You can also add built‑in stamps to /public/bar-editor-assets/stamps/ or define stamps/index.json.
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .brush-hud {
   position: absolute;
+  /* Fill the entire viewport pane so dropdowns/modals can use full height */
   top: 8px;
   right: 8px;
+  bottom: 8px;
+  left: 8px;
   z-index: 20;
   pointer-events: none; /* let viewport interact; buttons enable pointer-events explicitly */
 }
@@ -358,6 +617,8 @@ function endScrub() {
   box-shadow: 0 2px 8px rgba(0,0,0,0.35);
   pointer-events: auto;
   align-items: center;
+  flex-wrap: wrap; /* allow controls to wrap instead of overflowing horizontally */
+  max-width: calc(100% - 16px); /* adapt to full pane width minus padding */
 }
 
 .pill {
@@ -390,6 +651,7 @@ function endScrub() {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  position: relative; /* ensure nested absolute dropdowns (palette) are positioned correctly */
 }
 .group.small .btn {
   padding: 4px 8px;
@@ -412,6 +674,15 @@ function endScrub() {
   cursor: ew-resize;
   user-select: none;
 }
+.input {
+  min-width: 180px;
+  font-size: 12px;
+  color: #e6ebf5;
+  padding: 4px 6px;
+  border: 1px solid #2a2f3a;
+  border-radius: 6px;
+  background: #12151a;
+}
 
 .btn {
   border: 1px solid #2a2f3a;
@@ -428,8 +699,8 @@ function endScrub() {
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
 }
 .cell {
   border: 1px solid #2a2f3a;
@@ -449,16 +720,21 @@ function endScrub() {
 
 .palette {
   position: absolute;
-  top: 40px;
-  right: 0;
-  min-width: 280px;
-  max-width: 420px;
+  top: calc(100% + 6px); /* drop directly below the brush button */
+  left: 0;               /* open to the right of the button */
+  right: auto;
+  min-width: 360px;
+  min-height: 420px;             /* start taller so it doesn't feel compressed */
+  width: min(60vw, 700px);       /* allow a bit wider */
+  max-height: 90vh;              /* use viewport height to allow more Y space */
+  overflow: auto;
   background: rgba(12, 14, 18, 0.95);
   border: 1px solid #2a2f3a;
   border-radius: 10px;
-  padding: 8px 10px;
+  padding: 12px 14px;
   backdrop-filter: blur(3px);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.55);
+  z-index: 200; /* ensure above other overlays */
 }
 .sec {
   margin-bottom: 8px;
@@ -471,5 +747,136 @@ function endScrub() {
   font-weight: 600;
   font-size: 12px;
   margin-bottom: 6px;
+}
+/* Modal for ambientCG search */
+.modal {
+  position: absolute;
+  inset: 0; /* fill the brush-hud area; stays inside pane due to brush-hud bounds */
+  z-index: 250;
+  pointer-events: auto;
+}
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.35);
+}
+.modal-panel {
+  position: absolute;
+  top: 48px;
+  right: 8px;
+  width: min(840px, 92vw);        /* wider modal */
+  min-height: 480px;              /* ensure a comfortably tall starting size */
+  max-height: calc(100% - 24px);  /* nearly full pane height */
+  background: rgba(14,16,20,0.98);
+  border: 1px solid #2a2f3a;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.55);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.modal-stamps .modal-panel {
+  width: min(700px, 92vw);        /* stamps modal slightly narrower */
+}
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #2a2f3a;
+}
+.modal-subheader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #2a2f3a;
+  color: #cfd4e6;
+  font-size: 12px;
+}
+.modal-subheader .url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 70%;
+}
+.modal-subheader .url a {
+  color: #9fb0ff;
+  text-decoration: none;
+}
+.modal-subheader .url a:hover {
+  text-decoration: underline;
+}
+.modal-subheader .meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.btn.small {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+.modal-header .title {
+  color: #9fb0ff;
+  font-weight: 600;
+  font-size: 14px;
+}
+.modal-header .btn.close {
+  padding: 4px 8px;
+}
+.modal-body {
+  padding: 8px;
+  overflow: auto;
+}
+.loading, .error, .empty {
+  padding: 10px;
+  color: #cfd4e6;
+}
+.error { color: #ff8888; }
+.results {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.result {
+  display: grid;
+  grid-template-rows: auto auto;
+  gap: 6px;
+  border: 1px solid #2a2f3a;
+  border-radius: 8px;
+  background: #151920;
+  padding: 6px;
+}
+.thumb-wrap {
+  width: 100%;
+  aspect-ratio: 16/9;
+  background: #0d0f13;
+  border: 1px solid #202430;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+}
+.meta .name {
+  font-size: 12px;
+  color: #dde6ff;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.meta .btn.use {
+  padding: 4px 8px;
+  font-size: 12px;
 }
 </style>

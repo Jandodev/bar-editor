@@ -1,0 +1,19 @@
+{
+  "stamps": [
+    {
+      "id": "dunes",
+      "label": "Dunes Height",
+      "path": "dunes.png"
+    },
+    {
+      "id": "canyon",
+      "label": "Canyon Height",
+      "path": "canyon.png"
+    },
+    {
+      "id": "mountain",
+      "label": "Mountain Height",
+      "path": "mountain.png"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "assets": [
+    {
+      "id": "example-dunes",
+      "label": "Example Dunes (place PNG into /bar-editor-assets)",
+      "path": "/bar-editor-assets/example-dunes.png"
+    }
+  ]
+}

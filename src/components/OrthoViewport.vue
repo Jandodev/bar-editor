@@ -1910,6 +1910,9 @@ defineExpose({
   color: #dfe5f2;
   pointer-events: none;
   min-width: 160px;
+  max-width: calc(100% - 16px);  /* keep within viewport pane width */
+  max-height: calc(100% - 16px); /* keep within viewport pane height */
+  overflow: auto;                 /* scroll if needed on small panes */
 }
 .prof-row {
   display: flex;

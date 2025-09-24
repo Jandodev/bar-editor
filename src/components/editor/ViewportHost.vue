@@ -87,10 +87,12 @@ function onProfilerToggle() {
 .overlay {
   position: absolute;
   top: 8px;
-  left: 50%;
-  transform: translateX(-50%);
+  right: 8px;           /* anchor to pane edge so it never overflows */
+  left: auto;
+  transform: none;
   z-index: 5;
   pointer-events: auto;
+  max-width: calc(100% - 16px); /* ensure it fits within the pane */
 }
 .overlay-btn {
   padding: 4px 10px;
@@ -107,5 +109,7 @@ function onProfilerToggle() {
 .btn-row {
   display: inline-flex;
   gap: 6px;
+  flex-wrap: wrap;       /* wrap buttons on narrow panes */
+  max-width: 100%;
 }
 </style>

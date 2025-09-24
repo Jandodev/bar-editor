@@ -2,6 +2,7 @@ import { applyAddRemove, applySmooth } from '../terrain-edit'
 import flattenPlugin from '../../plugins/brushes/flatten'
 import terrainPack from '../../plugins/brushes/terrain-pack'
 import shapeVariants from '../../plugins/brushes/shape-variants'
+import heightmapStamp from '../../plugins/brushes/heightmap-stamp'
 
 // Brush plugin system for heightmap editing (VoxelSniper-inspired)
 // - Each brush is a module implementing Brush, registered with the BrushRegistry
@@ -66,6 +67,13 @@ export type BrushParamDef =
       type: 'select'
       default: string
       options: { label: string; value: string }[]
+    }
+  | {
+      key: string
+      label: string
+      type: 'text'
+      default: string
+      placeholder?: string
     }
 
 export interface Brush {
@@ -164,6 +172,9 @@ try {
 } catch {}
 try {
   registerFromUnknown(shapeVariants as unknown)
+} catch {}
+try {
+  registerFromUnknown(heightmapStamp as unknown)
 } catch {}
 
 // ----------------------

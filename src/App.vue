@@ -86,6 +86,12 @@ const showLeftPanel = ref(true)
 const showRightPanel = ref(true)
 // App container ref for width computation during drag
 const appRef = ref<HTMLDivElement | null>(null)
+const splitRef = ref<HTMLDivElement | null>(null)
+/** Mid split ratio between the two viewports (0..1), persisted */
+const splitRatio = ref<number>((() => {
+  const v = Number(localStorage.getItem('be.splitRatio') || '0.5')
+  return Number.isFinite(v) ? Math.min(0.9, Math.max(0.1, v)) : 0.5
+})())
 
 /* Splitter width (must match CSS .divider flex-basis) */
 const DIV_W = 6
@@ -103,14 +109,19 @@ const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(mi
 
 /* No static clamping at init; allow full range and prevent crossing only at runtime */
 
-let dragSide: 'left' | 'right' | null = null
+let dragSide: 'left' | 'right' | 'mid' | null = null
 let dragStartX = 0
 let dragStartWidth = 0
+let dragStartRatio = 0
 
-function startDrag(side: 'left'|'right', e: MouseEvent) {
+function startDrag(side: 'left' | 'right' | 'mid', e: MouseEvent) {
   dragSide = side
   dragStartX = e.clientX
-  dragStartWidth = side === 'left' ? leftWidth.value : rightWidth.value
+  if (side === 'mid') {
+    dragStartRatio = splitRatio.value
+  } else {
+    dragStartWidth = side === 'left' ? leftWidth.value : rightWidth.value
+  }
   window.addEventListener('mousemove', onDragMove)
   window.addEventListener('mouseup', onDragEnd)
   e.preventDefault()
@@ -125,7 +136,13 @@ function onDragMove(e: MouseEvent) {
   const reserved = (showLeftPanel.value ? DIV_W : 0) + (showRightPanel.value ? DIV_W : 0)
   const available = Math.max(0, appW - reserved)
 
-  if (dragSide === 'left') {
+  if (dragSide === 'mid') {
+    const splitW = splitRef.value?.clientWidth || 0
+    if (splitW > 0) {
+      const next = dragStartRatio + dx / splitW
+      splitRatio.value = clamp(next, 0.1, 0.9)
+    }
+  } else if (dragSide === 'left') {
     const maxLeft = Math.max(0, available - (showRightPanel.value ? rightWidth.value : 0))
     const next = dragStartWidth + dx
     leftWidth.value = Math.min(Math.max(0, next), maxLeft)
@@ -141,8 +158,12 @@ function onDragEnd() {
   if (!dragSide) return
   window.removeEventListener('mousemove', onDragMove)
   window.removeEventListener('mouseup', onDragEnd)
-  localStorage.setItem('be.leftWidth', String(leftWidth.value))
-  localStorage.setItem('be.rightWidth', String(rightWidth.value))
+  if (dragSide === 'mid') {
+    localStorage.setItem('be.splitRatio', String(splitRatio.value))
+  } else {
+    localStorage.setItem('be.leftWidth', String(leftWidth.value))
+    localStorage.setItem('be.rightWidth', String(rightWidth.value))
+  }
   // ensure final viewport resize
   try { window.dispatchEvent(new Event('resize')) } catch {}
   dragSide = null
@@ -167,6 +188,7 @@ function scheduleResizeEvent() {
 /* Persist on change as well */
 watch(leftWidth, (v) => localStorage.setItem('be.leftWidth', String(v)))
 watch(rightWidth, (v) => localStorage.setItem('be.rightWidth', String(v)))
+watch(splitRatio, (v) => localStorage.setItem('be.splitRatio', String(v)))
 
 /* When panels are shown/hidden, trigger a debounced resize so ThreeViewport recalculates */
 watch(showLeftPanel, (v) => {
@@ -1484,9 +1506,14 @@ export default defineComponent({
         <p>Select an .smf file to visualize the heightmap.</p>
         <p>You can also load a map folder (MAP_EXAMPLES_NOCOMMIT) to pick textures and overlays.</p>
       </div>
-      <div v-else class="viewport-grid">
-        <ViewportHost pluginId="perspective" :bus="bus" buttonLabel="Toggle Grid" />
-        <ViewportHost pluginId="orthographic" :bus="bus" buttonLabel="Rotate 90°" />
+      <div v-else class="viewport-split" ref="splitRef">
+        <div class="pane" :style="{ width: (splitRatio * 100).toFixed(2) + '%' }">
+          <ViewportHost pluginId="perspective" :bus="bus" buttonLabel="Toggle Grid" />
+        </div>
+        <div class="divider divider-middle" @mousedown="(e) => startDrag('mid', e)"></div>
+        <div class="pane" :style="{ width: ((1 - splitRatio) * 100).toFixed(2) + '%' }">
+          <ViewportHost pluginId="orthographic" :bus="bus" buttonLabel="Rotate 90°" />
+        </div>
       </div>
     </div>
 
@@ -2098,6 +2125,7 @@ button.small {
   border-left: 1px solid #222;
 }
 .viewport-grid {
+  /* deprecated by .viewport-split (kept for backward compatibility) */
   flex: 1 1 auto;
   min-width: 0;
   display: grid;
@@ -2105,6 +2133,25 @@ button.small {
   gap: 6px;
   padding: 6px;
   box-sizing: border-box;
+}
+.viewport-split {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  box-sizing: border-box;
+  align-items: stretch;
+  height: 100%;
+}
+.viewport-split .pane {
+  position: relative;
+  flex: 0 0 auto; /* width controlled via style binding */
+  min-width: 80px;
+  overflow: visible; /* adapt contents within the pane rather than clipping */
+}
+.divider-middle {
+  border-left: 1px solid #222;
 }
 .brush-docs {
   margin-top: 8px;
