@@ -1,283 +1,238 @@
-# BAR Web Map Editor (SPA) — Project Plan & Tracking
+# BAR Editor — Web Map Editor for Beyond All Reason (Spring RTS)
 
-Lightweight, single‑page, componentized web app to ingest, visualize, edit, and re‑export Beyond All Reason / Spring RTS maps in the browser using Three.js + WebGL.
+Lightweight, single‑page, WebGL/Vue editor that ingests, visualizes, edits, and re‑exports Spring/BAR maps directly in your browser. No installs, no native deps.
 
-This document tracks top‑level goals, milestones, architecture decisions, and status. Treat it as the living source of truth for scope and progress.
+- Stack: Vite + Vue 3 + TypeScript + Three.js
+- Formats: .smf (terrain), .sdz/.zip (map packages), folder trees
+- License: MIT
 
----
-
-## Vision
-
-- Users upload an existing Spring map package (sd7/sdz/zip or folder).
-- The app indexes files into an in‑browser Virtual File System (VFS).
-- We parse `mapinfo.lua` and other map files to discover referenced assets (SMF, SMT, textures, minimap, metal map, features).
-- We render the map in a Three.js viewport with switchable layers.
-- MVP editing: replace specific assets (textures, minimap, etc.) or add new ones.
-- Export a valid map package with updated contents.
-
-SPA requirement: One-page app with componentized UI so information is indexable and maintainable.
+Status: Early but usable. Terrain brushes, overlays, and SMF save/export are implemented. Packaging and some viewers are WIP.
 
 ---
 
-## Product Goals (top level)
+## Quick start
 
-- [ ] Accurate ingestion of Spring map structures (start with .sdz/.zip, then .sd7/7z via WASM)
-- [ ] Virtual File System (VFS) abstraction for complete in‑browser map indexing
-- [ ] Parse mapinfo.lua to resolve asset graph (SMF/SMT, textures, minimap, metal map, features)
-- [ ] Real-time 3D visualization of terrain and layers using Three.js
-- [ ] Lightweight editing workflows for replacing assets and regenerating derived data (e.g., minimap)
-- [ ] Re-export to a valid Spring map package with updated contents
-- [ ] Component-driven SPA architecture with clear separation of concerns
-- [ ] Performance targets that handle large maps without UI jank (web workers, streaming, tiling)
-- [ ] Automated validation against example maps
+1) Requirements
+- Node 18+ (recommended 20+)
+- A Chromium browser (Chrome/Edge) for best performance and save dialogs
+- Optional: a BAR map to try (or use the included “Blank Generic Map” example skeleton)
 
----
+2) Install and run
+- npm
+  - npm install
+  - npm run dev
+- pnpm
+  - pnpm install
+  - pnpm dev
 
-## Milestones and Checklists
+Vite will print a local URL. Open it in your browser.
 
-M0 — Project & Architecture Setup
-- [ ] Define component skeleton and folder structure
-- [ ] Establish state management (Pinia) and strict TypeScript config
-- [ ] Decide on worker setup (Vite workers) and binary parsing utilities
-- [ ] Basic error/reporting/log panel
+3) Load map data
+- Load .smf to visualize/edit terrain, or
+- Load .sdz/.zip to browse the map package (ingests mapinfo.lua + images), or
+- Load folder (pick a map directory tree, e.g. MyMap.sdd)
 
-M1 — Ingestion & VFS
-- [ ] Accept archive inputs: .sdz/.zip (phase 1), .sd7/7z (phase 2 via wasm)
-- [ ] Implement VFS with path normalization and indexed lookups
-- [ ] Map root detection, mapinfo.lua discovery
-- [ ] Lua parsing pipeline to JSON and schema validation
-- [ ] Asset graph build: resolve all referenced resources
+4) Edit
+- Enable Terrain Editing in the right panel
+- Pick a brush (Add/Remove/Smooth or plugins like Flatten, Erode, Terrace, etc.)
+- Adjust Radius/Strength
+- Click+drag in either viewport
 
-M2 — Map Format Parsing
-- [ ] SMF parser (geometry, heightmap, tiles mapping)
-- [ ] SMT tiles and texture material handling
-- [ ] Extract/visualize metal map
-- [ ] Minimap extraction
-- [ ] (Optional) feature placement data
+5) Save / Export
+- Save Edited SMF to get edited.smf
+- Export mapinfo.lua (points to maps/flat.smf) if you need a minimal mapinfo
 
-M3 — Visualization
-- [ ] Terrain mesh generation from heightmap with LOD strategy
-- [ ] Materials/shaders for diffuse/splat layers
-- [ ] Camera controls (orbit, pan, zoom)
-- [ ] Toggleable layer views (height, diffuse, metal, wireframe)
+6) Test in BAR (Windows example)
+- Create a folder: %LOCALAPPDATA%\Programs\Beyond-All-Reason\data\maps\MyMap.sdd
+- Put mapinfo.lua at the root of MyMap.sdd
+- Put your .smf in MyMap.sdd\maps\ (e.g. maps\flat.smf)
+- Launch BAR and select your map
 
-M4 — Editor MVP
-- [ ] Replace texture/minimap assets via upload
-- [ ] Live scene updates from VFS changes
-- [ ] Validation of asset dimensions/format
-- [ ] Export updated archive
-
-M5 — UX & Persistence
-- [ ] Undo/redo for asset replacements
-- [ ] Session autosave to IndexedDB
-- [ ] Robust error handling with actionable messages
-
-M6 — Validation & Examples
-- [ ] Test with sample maps (MAP_EXAMPLES_NOCOMMIT)
-- [ ] Sanity checks: re‑exported package loads in Spring/BAR
-- [ ] Performance profiling on large maps
+Tip: Use MAP_EXAMPLES_NOCOMMIT/blank-generic-map as a reference skeleton.
 
 ---
 
-## Current Repo Context
+## Features
 
-- Active app: `SMF_format_editor` (Vite + Vue + TS)
-- Existing code of interest:
-  - `src/lib/archive.ts` — archive handling
-  - `src/lib/mapinfo.ts` — map info handling
-  - `src/lib/smf.ts` — SMF parsing
-  - `src/components/ThreeViewport.vue` — Three.js viewport
-  - `src/debug/lua-debug.ts`, `lua-debug.html` — Lua parsing debug
-- We will refactor into a more componentized and modular structure (see below).
+Viewer
+- Dual viewports: Perspective + Orthographic
+- Terrain mesh rendering with adjustable wireframe + grid
+- Toggleable overlays: Metal map, Type map, Tiles index, Grass, Features
+- Minimap bytes ingest (DXT1) — on-canvas rendering WIP
+
+Ingestion
+- Open .smf files
+- Open .sdz/.zip map packages: auto-parses mapinfo.lua and indexes files
+- Open folders (webkitdirectory) or via the Directory Picker (Chrome/Edge): builds a virtual file browser
+- mapinfo.lua parsing to JSON; exposes map metadata and environment hints
+
+Editing
+- VoxelSniper-inspired brush system, plugin-based:
+  - Built-ins: raise, lower, smooth
+  - Plugins: flatten, level, blend, erode, dilate, fill, drain, terrace, noise, sharpen, raise-square, lower-square
+- Brush preview in viewports
+- Stride-aware editor: downsampling for performance, automatic bilinear upsampling on save
+- New Flat Map generator (.smf), or “Flat From Current” one-click flatten
+
+Assets & Overlays
+- Drag/drop images from package/folder into Overlays list
+- Mapinfo Resources panel binds images to mapinfo.smf/resources keys, with quick “Enable overlay” and “Use as base” actions
+- DDS awareness for overlays
+
+Save/Export
+- Save edited terrain to .smf (updates min/max in header)
+- Export a minimal mapinfo.lua that references maps/flat.smf
+- File System Access API save dialog on supported browsers, automatic download fallback otherwise
+
+Performance
+- Geometry downsampling based on map size (stride)
+- Efficient sub-rectangle edits; brushes return new Float32Array for reactive updates
+- Chrome recommended for faster WebGL and larger memory budgets
 
 ---
 
-## Architecture Overview
+## Limitations and notes
 
-Tech Stack
-- Vite + Vue 3 + TypeScript (SPA)
-- Three.js for rendering
-- Pinia for app state (lightweight and type-safe)
-- Web Workers for heavy/binary parsing (SMF/SMT) to keep UI responsive
-- Lua parser (existing)
-- Archive handling:
-  - Phase 1: zip/sdz (e.g., JSZip or existing custom)
-  - Phase 2: 7z/sd7 via wasm-7z (or libarchive wasm)
-
-High-Level Data Flow
-1. Upload archive/folder → Archive Reader → VFS (indexed)
-2. VFS → find `mapinfo.lua` → Lua parser → JSON config
-3. Resolve asset graph (SMF/SMT/texture/minimap/metal map)
-4. Parse SMF/SMT in a worker → build terrain + materials
-5. Store normalized state in Pinia → components subscribe
-6. Editor actions update VFS → re-render → export from VFS
+- .sd7 (7z) packages: not supported in-browser yet. Convert to .sdz/.zip to ingest, or load a folder.
+- Minimap rendering: ingest available; runtime decoding/rendering is WIP.
+- Packaging back to .sdz: not wired yet. For now:
+  - Use a .sdd folder (recommended for fast iteration), or
+  - Zip your folder as .sdz using your archiver (store/deflate).
+- Browsers cannot write to BAR’s maps directory automatically. Use the Save dialog, then copy files manually.
+- No Lua is executed; mapinfo.lua is parsed to JSON only.
 
 ---
 
-## Planned Directory Structure (refactor target)
+## How to test a new map quickly (sdd workflow)
 
-```
-SMF_format_editor/src/
-  modules/
-    vfs/
-      Vfs.ts                # In-memory virtual filesystem + index
-      ArchiveReader.ts      # Wraps archive.ts, normalizes paths
-      Exporter.ts           # Packs VFS → .sdz/.sd7 (phase 2)
-    parsers/
-      lua/
-        LuaParser.ts        # Wrap existing lua parser
-      smf.ts                # SMF parsing (worker-coop)
-      smt.ts                # SMT tiles parse/stream
-      mapinfo.ts            # Map info normalization/schema
-    workers/
-      smf.worker.ts         # Heavy parsing off main thread
-    state/
-      store.ts              # Pinia stores (VFS, map, scene)
-      types.ts              # Shared types/interfaces
-    viewers/
-      terrain/
-        buildTerrain.ts     # Mesh + materials from parsed data
-      layers/
-        metalLayer.ts
-        minimapLayer.ts
-  components/
-    app/
-      AppShell.vue
-      Toolbar.vue
-      StatusBar.vue
-      LogConsole.vue
-    panels/
-      FileUploadPanel.vue
-      FilesystemExplorer.vue
-      ResourceInspector.vue
-      PropertiesPanel.vue
-    viewport/
-      ThreeViewport.vue     # already exists (move/keep)
-    modals/
-      ReplaceAssetModal.vue
-  debug/
-    lua/
-      lua-debug.ts
-  lib/
-    archive.ts              # migrate into modules/vfs as needed
-    mapinfo.ts              # migrate into modules/parsers/mapinfo.ts
-    smf.ts                  # migrate into modules/parsers/smf.ts
+1) Create a folder like:
+- Windows: %LOCALAPPDATA%\Programs\Beyond-All-Reason\data\maps\MyMap.sdd
+- Linux: ~/.config/beyond-all-reason/data/maps/MyMap.sdd (varies by install)
+- macOS: ~/Library/Application Support/Beyond-All-Reason/data/maps/MyMap.sdd (varies by install)
+
+2) Inside MyMap.sdd:
+- mapinfo.lua           (root)
+- maps/flat.smf         (or your edited.smf, path must match mapinfo.lua)
+- textures/...          (optional, referenced textures)
+
+3) Ensure mapinfo.lua has mapfile = "maps/flat.smf" (or the filename you saved).
+4) Start BAR and select “MyMap”.
+
+Use MAP_EXAMPLES_NOCOMMIT/blank-generic-map as a template.
+
+---
+
+## Brush system (plugins)
+
+- Auto-discovers plugins from src/plugins/brushes/**/*.{ts,js} via Vite import.meta.glob
+- Add your own by dropping a file there; the Mode dropdown updates automatically
+- Docs:
+  - In-app: Right panel → “Terrain Editing (Experimental)” → Show Brush Docs
+  - Repo: src/lib/brushes/README.md and src/plugins/brushes-docs/overview.md
+
+Example plugin
+```ts
+// src/plugins/brushes/my-brush.ts
+import type { Brush } from '../../lib/brushes'
+export default <Brush>{
+  id: 'my-brush',
+  label: 'My Custom Brush',
+  apply: (a) => new Float32Array(a.heights),
+}
 ```
 
 ---
 
-## Key Components (SPA)
+## Usage guide
 
-- AppShell: layout, global toolbars, status, log console
-- FileUploadPanel: drag & drop archives/folders, input validation
-- FilesystemExplorer: tree/index of VFS contents
-- ResourceInspector: contextual details for selected file/asset
-- PropertiesPanel: map metadata, dimensions, tiling, shader options
-- ThreeViewport: renders terrain + layers with controls
-- ReplaceAssetModal: upload/validate/preview/commit replacement
-- LogConsole: user-facing logs, warnings, parse errors
-
----
-
-## Data Models (initial)
-
-- VfsFile
-  - path: string (normalized /)
-  - size: number
-  - type: 'file' | 'dir'
-  - mime?: string
-  - data?: ArrayBuffer | Blob | string (lazy-loaded/streaming)
-
-- MapIndex
-  - mapinfo: MapInfoNormalized
-  - smf: { path: string; meta: SmfMeta }
-  - smt?: { path: string }
-  - minimap?: { path: string }
-  - metal?: { path: string }
-  - textures: Record<string, { path: string; kind: 'diffuse'|'splat'|'normal'|... }>
-
-- SceneState
-  - camera: { position, target }
-  - layerVisibility: { height: boolean; diffuse: boolean; metal: boolean; wireframe: boolean }
-  - materialSettings: { splatBlend, scale, gamma }
+- Files toolbar (top): Load .smf, Load .sdz/.zip, Load folder, Load mapinfo.lua
+- Left panel: File browser of uploaded package/folder; quick actions per file:
+  - Parse mapinfo (lua) → parse and preview JSON
+  - Load SMF → visualize/edit heights
+  - Overlay / Use as base → quickly add images to the canvas or as base color
+- Right panel:
+  - New Flat Map: generate a brand-new SMF or flatten current
+  - Detection: SMT files found and mapinfo references
+  - Map Definition: name, shortname, version, author, mapfile
+  - Map Info: size, square size, height range, stride used
+  - Ortho View: switch right viewport (terrain/atlas/profiler)
+  - Display: toggles for overlays + wireframe/grid
+  - Terrain Editing (Experimental): enable brushes, choose mode/radius/strength, Save Edited SMF
+  - Base Texture: pick a base color image from loaded images
+  - Mapinfo Resources: bind overlays to mapinfo keys and enable them
+  - mapinfo.lua (parsed): view JSON
 
 ---
 
-## Dependencies (planned)
+## Troubleshooting
 
-Phase 1
-- three
-- pinia
-- Use TypeScript types and lightweight manual guards (no external schema lib)
-- JSZip (if needed) or continue using existing `archive.ts` approach
-- Comlink (optional) for worker RPC ergonomics
-
-Phase 2
-- wasm-7z (or libarchive wasm) for .sd7 support
-- draco/meshopt (optional) if we compress scene assets
+- BAR crashes with “supreme_xxx.smf not found”: Ensure mapinfo.lua’s mapfile matches your .smf filename and path under maps/.
+- Minimap not visible: SMF holds DXT1 minimap bytes; viewer rendering is WIP. You can still bind an external minimap image as an overlay.
+- Smooth seems too strong: Strength is [0..1] blend. Try 0.2.
+- No plugin brushes: Rebuild/refresh. Ensure src/lib/brushes is imported (the main UI does this). Place plugins in src/plugins/brushes/.
+- SD7 won’t open: Convert to .sdz/.zip, or open the map folder (sdd).
 
 ---
 
-## Definition of Done per Milestone
+## Development
 
-M1 (Ingestion)
-- VFS can list, read, and index all files in uploaded archive
-- mapinfo.lua parsed to JSON with validated fields
-- Asset graph built with resolved paths and missing-asset warnings
+Scripts
+- npm run dev — start Vite dev server
+- npm run build — typecheck + production build
+- npm run preview — preview built files
 
-M2 (Parsing)
-- SMF parsed with terrain dimensions and tile mapping
-- Metal map and minimap extracted
-- Benchmarked parsing in worker with no main thread stalls > 16ms
+Project layout (selected)
+- src/App.vue — main SPA with side panels + viewports
+- src/components/editor/ViewportHost.vue — viewport host
+- src/plugins/viewport/{perspective,orthographic}.ts — viewport plugins
+- src/lib/smf.ts — SMF parser
+- src/lib/smf-writer.ts — Write/patch SMF
+- src/lib/mapinfo.ts — mapinfo.lua parsing to JSON
+- src/lib/save.ts — File System Access API save helpers
+- src/lib/brushes/** — brush registry + types + docs
+- src/plugins/brushes/** — brush plugins (auto-loaded)
+- src/plugins/brushes-docs/** — inline help markdown
+- MAP_EXAMPLES_NOCOMMIT/** — example skeleton (not shipped)
 
-M3 (Visualization)
-- Terrain renders with correct scale and materials
-- Camera controls smooth at 60fps on mid‑range hardware
-- Layer toggles function correctly
+Debugging Lua
+- lua-debug.html and src/debug/lua-debug.ts have a minimal surface for parser testing.
 
-M4 (Editor MVP)
-- User can replace at least one texture class and the minimap
-- VFS updated and scene reflects changes instantly
-- Export produces a package mounting in Spring/BAR
-
----
-
-## Open Questions / Risks
-
-- sd7 support in browser: which wasm decompressor has best perf/size?
-- Very large textures/tiles memory pressure: tiling/streaming strategy
-- Variations in mapinfo.lua schema across maps: robust normalization
-- Feature placement data formats breadth (scope phase 2+)
-- WebGL precision and color space correctness for materials
-- Undo/redo granularity for binary assets (memory footprint)
+Browser notes
+- The editor prefers Chrome/Edge for File System Access API and higher WebGL budgets.
+- Firefox/Safari fall back to download prompts instead of native save dialogs.
 
 ---
 
-## Development Quickstart
+## Roadmap (short)
 
-App lives in `SMF_format_editor`:
+- Ingestion: wasm-based .sd7 support
+- Viewer: improved materials, minimap decoding, feature placement overlay
+- Editor: normals/specular/helpers, undo/redo, pathing preview
+- Export: full package builder (.sdz), validation
+- Integration: embed in BAR client where possible
 
-Windows PowerShell / CMD:
-- cd .\SMF_format_editor
-- npm install
-- npm run dev
-
-Then open the local dev URL (Vite). Use sample maps from `SMF_format_editor/MAP_EXAMPLES_NOCOMMIT` if available.
-
----
-
-## Tracking Board (summary)
-
-- [ ] M0: Architecture & skeleton
-- [ ] M1: Ingestion & VFS
-- [ ] M2: SMF/SMT parsing
-- [ ] M3: Visualization
-- [ ] M4: Editor MVP (replace assets + export)
-- [ ] M5: UX & persistence
-- [ ] M6: Validation & performance
+For a detailed milestone board, see the original planning doc in this file’s history.
 
 ---
 
-## Changelog
+## Contributing
 
-- 2025-09-20: Initial top-level plan created and checklists added.
+PRs and issues are welcome:
+- Keep brushes pure (input heights -> output heights); wire side-effects through the ResourceBus
+- Prefer TypeScript + small, composable modules
+- Keep the UI performant (do heavy work off main thread where reasonable)
+- Add docs to src/plugins/brushes-docs/ for new brushes
+
+---
+
+## Security
+
+- The app never executes Lua; it parses mapinfo.lua into JSON
+- Malicious code can exist in map packages in general; prefer trusted sources
+- This is a browser app — it cannot write to system directories; you choose where to save
+
+---
+
+## License
+
+MIT © 2025 Jando
